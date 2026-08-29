@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 
-"""
-Docker Hub / GHCR 镜像 rootfs 拉取工具
-用于 Unikraft 构建阶段。
-
-用法：
-
-python3 scripts/pull-base.py library/alpine 3.20 _build/rootfs
-python3 scripts/pull-base.py library/node 20-alpine _build/rootfs
-"""
-
 import json
 import os
 import subprocess
@@ -26,27 +16,28 @@ ACCEPT = ",".join([
 ])
 
 
-def http_json(url, token=None):
+def request_json(url, token=None):
+    request = urllib.request.Request(url)
 
-    headers = {
-        "User-Agent": "Unikraft-Firefox-Builder/1.0",
-        "Accept": ACCEPT,
-    }
+    request.add_header("Accept", ACCEPT)
 
     if token:
-        headers["Authorization"] = "Bearer " + token
+        request.add_header(
+            "Authorization",
+            "Bearer " + token
+        )
 
-    req = urllib.request.Request(
-        url,
-        headers=headers
-    )
+    with urllib.request.urlopen(
+        request,
+        timeout=120
+    ) as response:
 
-    with urllib.request.urlopen(req, timeout=120) as response:
-        return json.loads(response.read())
+        return json.loads(
+            response.read()
+        )
 
 
 def get_docker_token(repo):
-
     url = (
         "https://auth.docker.io/token"
         "?service=registry.docker.io"
@@ -54,70 +45,18 @@ def get_docker_token(repo):
         % repo
     )
 
-    data = http_json(url)
+    print("获取 Docker Hub Token...")
+
+    data = request_json(url)
 
     token = data.get("token")
 
     if not token:
         raise RuntimeError(
-            "无法获取 Docker Hub token"
+            "无法获取 Docker Hub Token"
         )
 
     return token
-
-
-def get_ghcr_token(repo):
-
-    url = (
-        "https://ghcr.io/token"
-        "?scope=repository:%s:pull"
-        % repo
-    )
-
-    data = http_json(url)
-
-    token = data.get("token")
-
-    if not token:
-        raise RuntimeError(
-            "无法获取 GHCR token"
-        )
-
-    return token
-
-
-def select_amd64(manifest):
-
-    manifests = manifest.get("manifests", [])
-
-    for item in manifests:
-
-        platform = item.get("platform") or {}
-
-        architecture = platform.get(
-            "architecture"
-        )
-
-        operating_system = platform.get(
-            "os"
-        )
-
-        annotations = item.get(
-            "annotations"
-        ) or {}
-
-        if (
-            operating_system == "linux"
-            and architecture == "amd64"
-            and annotations.get(
-                "vnd.docker.reference.type"
-            ) != "attestation-manifest"
-        ):
-            return item["digest"]
-
-    raise RuntimeError(
-        "镜像没有 linux/amd64 版本"
-    )
 
 
 def download_blob(
@@ -125,7 +64,7 @@ def download_blob(
     repo,
     digest,
     token,
-    filename
+    output
 ):
 
     url = (
@@ -137,34 +76,28 @@ def download_blob(
         )
     )
 
-    headers = {
-        "User-Agent": "Unikraft-Firefox-Builder/1.0"
-    }
+    request = urllib.request.Request(url)
 
     if token:
-        headers["Authorization"] = (
+        request.add_header(
+            "Authorization",
             "Bearer " + token
         )
 
-    request = urllib.request.Request(
-        url,
-        headers=headers
-    )
-
-    print(
-        "下载 layer：%s"
-        % digest
-    )
+    print("")
+    print("下载：%s" % digest)
 
     with urllib.request.urlopen(
         request,
         timeout=900
     ) as response:
 
+        total = 0
+
         with open(
-            filename,
+            output,
             "wb"
-        ) as output:
+        ) as file:
 
             while True:
 
@@ -175,7 +108,14 @@ def download_blob(
                 if not chunk:
                     break
 
-                output.write(chunk)
+                file.write(chunk)
+
+                total += len(chunk)
+
+    print(
+        "下载完成：%d bytes"
+        % total
+    )
 
 
 def extract_layer(
@@ -183,9 +123,9 @@ def extract_layer(
     destination
 ):
 
-    os.makedirs(
-        destination,
-        exist_ok=True
+    print(
+        "解包：%s"
+        % os.path.basename(archive)
     )
 
     result = subprocess.run(
@@ -197,20 +137,69 @@ def extract_layer(
             destination
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stderr=subprocess.PIPE,
+        text=True
     )
 
     if result.returncode != 0:
 
-        error = result.stderr.decode(
-            "utf-8",
-            errors="replace"
+        print(
+            "tar 解包失败："
+        )
+
+        print(
+            result.stderr
         )
 
         raise RuntimeError(
-            "解压 layer 失败：\n"
-            + error
+            "Docker layer 解包失败"
         )
+
+
+def select_amd64(manifest):
+
+    manifests = manifest.get(
+        "manifests",
+        []
+    )
+
+    for item in manifests:
+
+        platform = item.get(
+            "platform",
+            {}
+        )
+
+        architecture = platform.get(
+            "architecture"
+        )
+
+        operating_system = platform.get(
+            "os"
+        )
+
+        annotations = item.get(
+            "annotations",
+            {}
+        )
+
+        reference_type = annotations.get(
+            "vnd.docker.reference.type"
+        )
+
+        if (
+            operating_system == "linux"
+            and
+            architecture == "amd64"
+            and
+            reference_type != "attestation-manifest"
+        ):
+
+            return item.get(
+                "digest"
+            )
+
+    return None
 
 
 def main():
@@ -223,8 +212,17 @@ def main():
 
         print(
             "python3 scripts/pull-base.py "
-            "<repo> <tag> <dest> "
-            "[registry]"
+            "<repo> <tag> <dest>"
+        )
+
+        print("")
+        print(
+            "例如："
+        )
+
+        print(
+            "python3 scripts/pull-base.py "
+            "library/node 20-alpine _build/rootfs"
         )
 
         sys.exit(1)
@@ -234,9 +232,16 @@ def main():
     destination = sys.argv[3]
 
     registry = (
-        sys.argv[4]
-        if len(sys.argv) >= 5
-        else "https://registry-1.docker.io"
+        "https://registry-1.docker.io"
+    )
+
+    print("")
+    print(
+        "======================================"
+    )
+
+    print(
+        "Docker 基础镜像下载器"
     )
 
     print(
@@ -244,68 +249,57 @@ def main():
     )
 
     print(
-        "拉取基础镜像"
+        "镜像：%s:%s"
+        % (
+            repo,
+            tag
+        )
     )
 
     print(
-        "======================================"
+        "平台：linux/amd64"
     )
 
     print(
-        "Registry : %s"
-        % registry
-    )
-
-    print(
-        "Repository: %s"
-        % repo
-    )
-
-    print(
-        "Tag      : %s"
-        % tag
-    )
-
-    print(
-        "Target   : %s"
+        "目标：%s"
         % destination
     )
 
-    # --------------------------------
-    # 获取认证 token
-    # --------------------------------
+    print(
+        "======================================"
+    )
 
-    token = None
+    os.makedirs(
+        destination,
+        exist_ok=True
+    )
 
-    if "ghcr.io" in registry:
+    # --------------------------------------
+    # 获取 Docker Hub Token
+    # --------------------------------------
 
-        print(
-            "获取 GHCR token..."
-        )
-
-        token = get_ghcr_token(
-            repo
-        )
-
-    elif "registry-1.docker.io" in registry:
-
-        print(
-            "获取 Docker Hub token..."
-        )
+    try:
 
         token = get_docker_token(
             repo
         )
 
-    else:
+    except Exception as error:
 
+        print("")
         print(
-            "使用匿名 Registry..."
+            "获取 Docker Hub Token 失败："
         )
 
-    # --------------------------------
-    # 获取 manifest
-    # --------------------------------
+        print(
+            str(error)
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------
+    # 获取镜像 Manifest
+    # --------------------------------------
 
     manifest_url = (
         "%s/v2/%s/manifests/%s"
@@ -316,18 +310,34 @@ def main():
         )
     )
 
+    print("")
     print(
-        "获取镜像 manifest..."
+        "获取镜像 Manifest..."
     )
 
-    manifest = http_json(
-        manifest_url,
-        token
-    )
+    try:
 
-    # --------------------------------
+        manifest = request_json(
+            manifest_url,
+            token
+        )
+
+    except Exception as error:
+
+        print("")
+        print(
+            "获取 Manifest 失败："
+        )
+
+        print(
+            str(error)
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------
     # 多架构镜像
-    # --------------------------------
+    # --------------------------------------
 
     if "manifests" in manifest:
 
@@ -339,8 +349,16 @@ def main():
             manifest
         )
 
+        if not digest:
+
+            print(
+                "错误：没有找到 linux/amd64 镜像"
+            )
+
+            sys.exit(1)
+
         print(
-            "选择 linux/amd64：%s"
+            "选择 amd64：%s"
             % digest
         )
 
@@ -353,14 +371,28 @@ def main():
             )
         )
 
-        manifest = http_json(
-            manifest_url,
-            token
-        )
+        try:
 
-    # --------------------------------
+            manifest = request_json(
+                manifest_url,
+                token
+            )
+
+        except Exception as error:
+
+            print(
+                "获取 amd64 Manifest 失败："
+            )
+
+            print(
+                str(error)
+            )
+
+            sys.exit(1)
+
+    # --------------------------------------
     # 获取 layers
-    # --------------------------------
+    # --------------------------------------
 
     layers = manifest.get(
         "layers",
@@ -369,52 +401,71 @@ def main():
 
     if not layers:
 
-        raise RuntimeError(
-            "镜像没有 layers"
+        print(
+            "错误：Manifest 中没有 layers"
         )
 
+        sys.exit(1)
+
+    print("")
     print(
-        "Layers：%d"
+        "Layer 数量：%d"
         % len(layers)
     )
 
-    os.makedirs(
-        destination,
-        exist_ok=True
-    )
-
-    # --------------------------------
-    # 下载并解压
-    # --------------------------------
+    # --------------------------------------
+    # 下载并解包 layers
+    # --------------------------------------
 
     for index, layer in enumerate(
         layers,
         start=1
     ):
 
-        digest = layer["digest"]
-
-        size = layer.get(
-            "size",
-            0
+        digest = layer.get(
+            "digest"
         )
 
-        temporary = (
+        if not digest:
+
+            print(
+                "错误：Layer 没有 digest"
+            )
+
+            sys.exit(1)
+
+        safe_digest = digest.replace(
+            ":",
+            "_"
+        )
+
+        temporary_file = (
             "/tmp/"
-            "unikraft-layer-%d.tar.gz"
-            % index
-        )
-
-        print(
-            ""
-        )
-
-        print(
-            "[%d/%d] 下载 %.2f MB"
+            "unikraft-layer-%d-%s.tar.gz"
             % (
                 index,
-                len(layers),
-                size / 1024 / 1024
+                safe_digest
+            )
+        )
+
+        print("")
+        print(
+            "======================================"
+        )
+
+        print(
+            "Layer %d/%d"
+            % (
+                index,
+                len(layers)
+            )
+        )
+
+        print(
+            "大小：%d bytes"
+            % layer.get(
+                "size",
+                0
             )
         )
 
@@ -425,177 +476,86 @@ def main():
                 repo,
                 digest,
                 token,
-                temporary
+                temporary_file
             )
 
             extract_layer(
-                temporary,
+                temporary_file,
                 destination
             )
 
         finally:
 
             if os.path.exists(
-                temporary
+                temporary_file
             ):
 
                 os.remove(
-                    temporary
+                    temporary_file
                 )
 
         print(
-            "[%d/%d] 完成"
+            "Layer %d/%d 完成"
             % (
                 index,
                 len(layers)
             )
         )
 
-    # --------------------------------
-    # 获取镜像 Config
-    # --------------------------------
+    # --------------------------------------
+    # 完成
+    # --------------------------------------
 
-    config = manifest.get(
-        "config"
+    print("")
+    print(
+        "======================================"
     )
 
-    if config:
-
-        digest = config.get(
-            "digest"
-        )
-
-        if digest:
-
-            print(
-                "读取镜像启动配置..."
-            )
-
-            url = (
-                "%s/v2/%s/blobs/%s"
-                % (
-                    registry,
-                    repo,
-                    digest
-                )
-            )
-
-            headers = {
-                "User-Agent":
-                    "Unikraft-Firefox-Builder/1.0",
-                "Authorization":
-                    "Bearer " + token
-                    if token
-                    else ""
-            }
-
-            request = urllib.request.Request(
-                url,
-                headers=headers
-            )
-
-            try:
-
-                with urllib.request.urlopen(
-                    request,
-                    timeout=120
-                ) as response:
-
-                    image_config = json.loads(
-                        response.read()
-                    )
-
-                runtime = (
-                    image_config.get(
-                        "config"
-                    ) or {}
-                )
-
-                result = {
-                    "entrypoint":
-                        runtime.get(
-                            "Entrypoint"
-                        ) or [],
-
-                    "cmd":
-                        runtime.get(
-                            "Cmd"
-                        ) or [],
-
-                    "working_dir":
-                        runtime.get(
-                            "WorkingDir"
-                        ) or "/",
-
-                    "env":
-                        runtime.get(
-                            "Env"
-                        ) or [],
-                }
-
-                with open(
-                    os.path.join(
-                        destination,
-                        ".image-config.json"
-                    ),
-                    "w",
-                    encoding="utf-8"
-                ) as f:
-
-                    json.dump(
-                        result,
-                        f,
-                        ensure_ascii=False,
-                        indent=2
-                    )
-
-                print(
-                    "镜像启动配置已保存"
-                )
-
-            except Exception as error:
-
-                print(
-                    "警告：读取镜像启动配置失败：%s"
-                    % error
-                )
-
-    # --------------------------------
-    # 检查 rootfs
-    # --------------------------------
-
-    important = [
-        "bin",
-        "usr",
-        "etc"
-    ]
-
-    found = []
-
-    for item in important:
-
-        if os.path.exists(
-            os.path.join(
-                destination,
-                item
-            )
-        ):
-
-            found.append(item)
-
-    if not found:
-
-        raise RuntimeError(
-            "rootfs 解包异常，"
-            "没有找到 bin/usr/etc"
-        )
-
     print(
-        ""
+        "rootfs 准备完成"
     )
 
     print(
         "======================================"
     )
 
-    print
+    print(
+        "位置：%s"
+        % destination
+    )
+
+    # --------------------------------------
+    # 检查 Node
+    # --------------------------------------
+
+    node_path = os.path.join(
+        destination,
+        "usr",
+        "local",
+        "bin",
+        "node"
+    )
+
+    if os.path.exists(
+        node_path
+    ):
+
+        print(
+            "Node.js：已找到"
+        )
+
+    else:
+
+        print(
+            "警告：没有检测到 /usr/local/bin/node"
+        )
+
+    print("")
+    print(
+        "基础镜像下载完成"
+    )
+
+
+if __name__ == "__main__":
+
+    main()
