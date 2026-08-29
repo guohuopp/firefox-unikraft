@@ -1,211 +1,198 @@
-'use strict';
+"use strict";
 
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { execFile, spawn } = require('child_process');
-const { promisify } = require('util');
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const { spawn } = require("child_process");
+const { execFileSync } = require("child_process");
+const { pipeline } = require("stream");
+const { promisify } = require("util");
 
-const execFileAsync = promisify(execFile);
-
-/* ============================================================
- * 基础配置
- * ============================================================ */
+const pipelineAsync = promisify(pipeline);
 
 const PORT = Number(process.env.PORT || 3000);
 
-const APP_DIR = '/app';
+const FIREFOX_VERSION =
+    process.env.FIREFOX_VERSION || "154.0.1";
 
-const FIREFOX_DIR = path.join(APP_DIR, 'firefox');
+const FIREFOX_DIR =
+    "/app/firefox";
 
-const PROFILE_DIR = path.join(APP_DIR, 'firefox-profile');
+const FIREFOX_EXTRACT_DIR =
+    path.join(FIREFOX_DIR, "firefox");
 
-const DOWNLOAD_DIR = path.join(APP_DIR, 'downloads');
+const FIREFOX_EXECUTABLE =
+    path.join(
+        FIREFOX_EXTRACT_DIR,
+        "firefox"
+    );
+
+const PROFILE_DIR =
+    process.env.FIREFOX_PROFILE ||
+    "/app/firefox-profile";
+
+const DOWNLOAD_URL =
+    "https://ftp.mozilla.org/pub/firefox/releases/" +
+    FIREFOX_VERSION +
+    "/linux-x86_64/en-US/firefox-" +
+    FIREFOX_VERSION +
+    ".tar.xz";
 
 let firefoxProcess = null;
 
-let firefoxPath = null;
+let firefoxState = {
+    running: false,
+    error: null,
+    pid: null,
+    startedAt: null
+};
 
-let firefoxVersion = 'unknown';
 
-let firefoxRunning = false;
-
-let firefoxError = null;
-
-let installing = false;
-
-/* ============================================================
- * 日志
- * ============================================================ */
+// ============================================================
+// 日志
+// ============================================================
 
 function log(...args) {
-    console.log('[Firefox]', ...args);
+    console.log(
+        "[Firefox]",
+        ...args
+    );
 }
 
-/* ============================================================
- * 创建目录
- * ============================================================ */
 
-function ensureDirectories() {
-    fs.mkdirSync(FIREFOX_DIR, { recursive: true });
-    fs.mkdirSync(PROFILE_DIR, { recursive: true });
-    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
-}
+// ============================================================
+// HTTP 下载
+// ============================================================
 
-/* ============================================================
- * HTTP 下载
- * ============================================================ */
+function downloadFile(
+    url,
+    destination
+) {
+    return new Promise(
+        (resolve, reject) => {
 
-function downloadFile(url, destination) {
-    return new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(destination);
+            const file =
+                fs.createWriteStream(
+                    destination
+                );
 
-        const request = https.get(
-            url,
-            {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 Firefox-Unikraft'
-                }
-            },
-            response => {
+            const request =
+                https.get(
+                    url,
+                    {
+                        headers: {
+                            "User-Agent":
+                                "Mozilla/5.0 Firefox-Unikraft"
+                        }
+                    },
+                    response => {
 
-                // HTTP 重定向
-                if (
-                    response.statusCode >= 300 &&
-                    response.statusCode < 400 &&
-                    response.headers.location
-                ) {
-                    file.close();
+                        // Mozilla CDN 可能重定向
+                        if (
+                            response.statusCode >= 300 &&
+                            response.statusCode < 400 &&
+                            response.headers.location
+                        ) {
 
-                    try {
-                        fs.unlinkSync(destination);
-                    } catch (_) {}
+                            file.close();
 
-                    return downloadFile(
-                        response.headers.location,
-                        destination
-                    )
-                        .then(resolve)
-                        .catch(reject);
-                }
+                            try {
+                                fs.unlinkSync(
+                                    destination
+                                );
+                            } catch (_) {}
 
-                if (response.statusCode !== 200) {
-                    file.close();
+                            downloadFile(
+                                response.headers.location,
+                                destination
+                            )
+                            .then(resolve)
+                            .catch(reject);
 
-                    try {
-                        fs.unlinkSync(destination);
-                    } catch (_) {}
-
-                    return reject(
-                        new Error(
-                            `下载失败 HTTP ${response.statusCode}`
-                        )
-                    );
-                }
-
-                response.pipe(file);
-
-                file.on('finish', () => {
-                    file.close(() => resolve());
-                });
-            }
-        );
-
-        request.setTimeout(10 * 60 * 1000, () => {
-            request.destroy(
-                new Error('Firefox 下载超时')
-            );
-        });
-
-        request.on('error', error => {
-            file.close();
-
-            try {
-                fs.unlinkSync(destination);
-            } catch (_) {}
-
-            reject(error);
-        });
-    });
-}
-
-/* ============================================================
- * 获取 Firefox 最新版本
- * ============================================================ */
-
-function getLatestFirefoxVersion() {
-    return new Promise((resolve, reject) => {
-
-        const url =
-            'https://product-details.mozilla.org/1.0/firefox_versions.json';
-
-        https.get(
-            url,
-            {
-                headers: {
-                    'User-Agent': 'Firefox-Unikraft'
-                }
-            },
-            response => {
-
-                let data = '';
-
-                response.on('data', chunk => {
-                    data += chunk;
-                });
-
-                response.on('end', () => {
-
-                    try {
-
-                        const json = JSON.parse(data);
-
-                        const version =
-                            json.LATEST_FIREFOX_VERSION;
-
-                        if (!version) {
-                            throw new Error(
-                                '无法获取 Firefox 最新版本'
-                            );
+                            return;
                         }
 
-                        resolve(version);
+                        if (
+                            response.statusCode !== 200
+                        ) {
 
-                    } catch (error) {
-                        reject(error);
+                            file.close();
+
+                            try {
+                                fs.unlinkSync(
+                                    destination
+                                );
+                            } catch (_) {}
+
+                            reject(
+                                new Error(
+                                    "HTTP " +
+                                    response.statusCode
+                                )
+                            );
+
+                            return;
+                        }
+
+                        response.pipe(file);
+
+                        file.on(
+                            "finish",
+                            () => {
+
+                                file.close(
+                                    () => resolve()
+                                );
+
+                            }
+                        );
+
                     }
-                });
-            }
-        ).on('error', reject);
-    });
+                );
+
+            request.on(
+                "error",
+                error => {
+
+                    file.close();
+
+                    try {
+                        fs.unlinkSync(
+                            destination
+                        );
+                    } catch (_) {}
+
+                    reject(error);
+                }
+            );
+
+        }
+    );
 }
 
-/* ============================================================
- * 判断文件是否为 Firefox 可执行文件
- * ============================================================ */
 
-function isFirefoxExecutable(file) {
+// ============================================================
+// 执行命令
+// ============================================================
 
+function commandExists(
+    command
+) {
     try {
 
-        if (!fs.statSync(file).isFile()) {
-            return false;
-        }
-
-        const base = path.basename(file).toLowerCase();
-
-        if (
-            base !== 'firefox' &&
-            base !== 'firefox-bin'
-        ) {
-            return false;
-        }
-
-        fs.accessSync(
-            file,
-            fs.constants.X_OK
+        execFileSync(
+            "sh",
+            [
+                "-c",
+                "command -v " +
+                command
+            ],
+            {
+                stdio: "ignore"
+            }
         );
 
         return true;
@@ -216,916 +203,977 @@ function isFirefoxExecutable(file) {
     }
 }
 
-/* ============================================================
- * 递归寻找 Firefox
- * ============================================================ */
 
-function findFirefoxExecutable(root) {
+// ============================================================
+// Firefox 文件检查
+// ============================================================
 
-    if (!fs.existsSync(root)) {
-        return null;
+function inspectFirefox() {
+
+    log(
+        "检查 Firefox：",
+        FIREFOX_EXECUTABLE
+    );
+
+    if (
+        !fs.existsSync(
+            FIREFOX_EXECUTABLE
+        )
+    ) {
+
+        log(
+            "错误：Firefox 可执行文件不存在"
+        );
+
+        return false;
     }
 
-    const queue = [root];
+    const stat =
+        fs.statSync(
+            FIREFOX_EXECUTABLE
+        );
 
-    while (queue.length > 0) {
-
-        const current = queue.shift();
-
-        let entries;
-
-        try {
-            entries = fs.readdirSync(
-                current,
-                {
-                    withFileTypes: true
-                }
-            );
-        } catch (_) {
-            continue;
-        }
-
-        for (const entry of entries) {
-
-            const fullPath =
-                path.join(
-                    current,
-                    entry.name
-                );
-
-            if (entry.isDirectory()) {
-
-                // 不扫描 profile 和 downloads
-                if (
-                    fullPath === PROFILE_DIR ||
-                    fullPath === DOWNLOAD_DIR
-                ) {
-                    continue;
-                }
-
-                queue.push(fullPath);
-
-                continue;
-            }
-
-            if (isFirefoxExecutable(fullPath)) {
-
-                return fullPath;
-            }
-        }
-    }
-
-    return null;
-}
-
-/* ============================================================
- * 修复 Firefox 权限
- * ============================================================ */
-
-function fixFirefoxPermissions(root) {
-
-    if (!fs.existsSync(root)) {
-        return;
-    }
-
-    const queue = [root];
-
-    while (queue.length > 0) {
-
-        const current = queue.shift();
-
-        let entries;
-
-        try {
-            entries = fs.readdirSync(
-                current,
-                {
-                    withFileTypes: true
-                }
-            );
-        } catch (_) {
-            continue;
-        }
-
-        for (const entry of entries) {
-
-            const fullPath =
-                path.join(
-                    current,
-                    entry.name
-                );
-
-            if (entry.isDirectory()) {
-
-                queue.push(fullPath);
-
-            } else if (
-                entry.name === 'firefox' ||
-                entry.name === 'firefox-bin'
-            ) {
-
-                try {
-                    fs.chmodSync(
-                        fullPath,
-                        0o755
-                    );
-                } catch (_) {}
-            }
-        }
-    }
-}
-
-/* ============================================================
- * 显示 Firefox 目录
- * ============================================================ */
-
-function printFirefoxDirectory() {
-
-    log('Firefox 安装目录检查：');
+    log(
+        "Firefox 文件大小：",
+        stat.size,
+        "bytes"
+    );
 
     try {
 
-        const result = [];
-
-        function walk(dir, depth) {
-
-            if (depth > 4) {
-                return;
-            }
-
-            let entries;
-
-            try {
-                entries = fs.readdirSync(
-                    dir,
-                    {
-                        withFileTypes: true
-                    }
-                );
-            } catch (_) {
-                return;
-            }
-
-            for (const entry of entries) {
-
-                const full =
-                    path.join(
-                        dir,
-                        entry.name
-                    );
-
-                result.push(full);
-
-                if (entry.isDirectory()) {
-                    walk(full, depth + 1);
-                }
-            }
-        }
-
-        walk(FIREFOX_DIR, 0);
-
-        for (const item of result.slice(0, 150)) {
-            console.log(item);
-        }
+        fs.chmodSync(
+            FIREFOX_EXECUTABLE,
+            0o755
+        );
 
     } catch (error) {
 
         log(
-            '无法读取 Firefox 目录：',
+            "chmod Firefox 失败：",
             error.message
         );
     }
+
+    // --------------------------------------------------------
+    // file
+    // --------------------------------------------------------
+
+    if (
+        commandExists("file")
+    ) {
+
+        try {
+
+            const result =
+                execFileSync(
+                    "file",
+                    [
+                        FIREFOX_EXECUTABLE
+                    ],
+                    {
+                        encoding:
+                            "utf8"
+                    }
+                );
+
+            log(
+                "file：",
+                result.trim()
+            );
+
+        } catch (error) {
+
+            log(
+                "file 检查失败：",
+                error.message
+            );
+        }
+    }
+
+    // --------------------------------------------------------
+    // ldd
+    // --------------------------------------------------------
+
+    if (
+        commandExists("ldd")
+    ) {
+
+        try {
+
+            const result =
+                execFileSync(
+                    "ldd",
+                    [
+                        FIREFOX_EXECUTABLE
+                    ],
+                    {
+                        encoding:
+                            "utf8"
+                    }
+                );
+
+            log(
+                "Firefox 动态库："
+            );
+
+            console.log(
+                result
+            );
+
+        } catch (error) {
+
+            log(
+                "ldd 检查失败：",
+                error.stdout ||
+                error.message
+            );
+        }
+    }
+
+    return true;
 }
 
-/* ============================================================
- * 解压 Firefox
- * ============================================================ */
 
-async function extractFirefox(archive) {
+// ============================================================
+// 安装 Firefox
+// ============================================================
 
-    log('正在解压 Firefox...');
+async function installFirefox() {
 
-    // 先尝试 tar
+    if (
+        fs.existsSync(
+            FIREFOX_EXECUTABLE
+        )
+    ) {
+
+        log(
+            "Firefox 已经存在"
+        );
+
+        inspectFirefox();
+
+        return;
+    }
+
+    log(
+        "Firefox %s 安装开始",
+        FIREFOX_VERSION
+    );
+
+    fs.mkdirSync(
+        FIREFOX_DIR,
+        {
+            recursive: true
+        }
+    );
+
+    const archive =
+        path.join(
+            "/tmp",
+            "firefox-" +
+            FIREFOX_VERSION +
+            ".tar.xz"
+        );
+
+    log(
+        "正在下载 Firefox..."
+    );
+
+    log(
+        DOWNLOAD_URL
+    );
+
+    await downloadFile(
+        DOWNLOAD_URL,
+        archive
+    );
+
+    log(
+        "Firefox 下载完成：",
+        fs.statSync(
+            archive
+        ).size,
+        "bytes"
+    );
+
+    // --------------------------------------------------------
+    // 检查 tar
+    // --------------------------------------------------------
+
+    if (
+        !commandExists("tar")
+    ) {
+
+        throw new Error(
+            "系统没有 tar"
+        );
+    }
+
+    log(
+        "正在解压 Firefox..."
+    );
+
     try {
 
-        await execFileAsync(
-            'tar',
+        execFileSync(
+            "tar",
             [
-                '-xJf',
+                "-xJf",
                 archive,
-                '-C',
+                "-C",
                 FIREFOX_DIR
             ],
             {
-                timeout: 5 * 60 * 1000
+                stdio: "inherit"
             }
         );
-
-        return;
-
-    } catch (error) {
-
-        log(
-            'tar -xJf 解压失败：',
-            error.message
-        );
-    }
-
-    // 如果系统 tar 不支持 xz，
-    // 尝试使用 xz + tar
-    try {
-
-        await execFileAsync(
-            'sh',
-            [
-                '-c',
-                `xz -dc "${archive}" | tar -xf - -C "${FIREFOX_DIR}"`
-            ],
-            {
-                timeout: 5 * 60 * 1000
-            }
-        );
-
-        return;
 
     } catch (error) {
 
         throw new Error(
-            `Firefox 解压失败：${error.message}`
+            "Firefox 解压失败：" +
+            error.message
         );
     }
-}
-
-/* ============================================================
- * 下载并安装 Firefox
- * ============================================================ */
-
-async function installFirefox() {
-
-    if (installing) {
-        return;
-    }
-
-    installing = true;
 
     try {
 
-        ensureDirectories();
-
-        log('系统架构：', os.arch());
-
-        if (os.arch() !== 'x64') {
-
-            throw new Error(
-                `当前架构 ${os.arch()}，此版本程序只支持 x64 Firefox`
-            );
-        }
-
-        // ----------------------------------------------------
-        // 如果之前已经安装，直接寻找
-        // ----------------------------------------------------
-
-        let existing =
-            findFirefoxExecutable(FIREFOX_DIR);
-
-        if (existing) {
-
-            firefoxPath = existing;
-
-            log(
-                '发现已经安装的 Firefox：',
-                firefoxPath
-            );
-
-            await detectFirefoxVersion();
-
-            return;
-        }
-
-        // ----------------------------------------------------
-        // 获取最新版本
-        // ----------------------------------------------------
-
-        log('正在获取 Firefox 最新版本...');
-
-        const version =
-            await getLatestFirefoxVersion();
-
-        firefoxVersion = version;
-
-        log(
-            'Mozilla 最新 Firefox：',
-            version
-        );
-
-        // ----------------------------------------------------
-        // Firefox 官方 x64 Linux
-        // ----------------------------------------------------
-
-        const url =
-            `https://ftp.mozilla.org/pub/firefox/releases/${version}/linux-x86_64/en-US/firefox-${version}.tar.xz`;
-
-        const archive =
-            path.join(
-                DOWNLOAD_DIR,
-                `firefox-${version}.tar.xz`
-            );
-
-        log(
-            '正在下载 Firefox',
-            version
-        );
-
-        log(url);
-
-        await downloadFile(
-            url,
+        fs.unlinkSync(
             archive
         );
 
-        const size =
-            fs.statSync(archive).size;
+    } catch (_) {}
 
-        log(
-            `下载完成：${(size / 1024 / 1024).toFixed(2)} MB`
+    log(
+        "Firefox 解压完成"
+    );
+
+    if (
+        !fs.existsSync(
+            FIREFOX_EXECUTABLE
+        )
+    ) {
+
+        throw new Error(
+            "Firefox 解压后找不到：" +
+            FIREFOX_EXECUTABLE
         );
-
-        // ----------------------------------------------------
-        // 解压
-        // ----------------------------------------------------
-
-        await extractFirefox(
-            archive
-        );
-
-        // ----------------------------------------------------
-        // 修复权限
-        // ----------------------------------------------------
-
-        fixFirefoxPermissions(
-            FIREFOX_DIR
-        );
-
-        // ----------------------------------------------------
-        // 自动寻找真正 executable
-        // ----------------------------------------------------
-
-        existing =
-            findFirefoxExecutable(
-                FIREFOX_DIR
-            );
-
-        if (!existing) {
-
-            printFirefoxDirectory();
-
-            throw new Error(
-                'Firefox 解压完成，但没有找到 firefox 可执行文件'
-            );
-        }
-
-        firefoxPath = existing;
-
-        log(
-            'Firefox 实际可执行文件：',
-            firefoxPath
-        );
-
-        // ----------------------------------------------------
-        // 删除安装包，节省空间
-        // ----------------------------------------------------
-
-        try {
-            fs.unlinkSync(archive);
-        } catch (_) {}
-
-        await detectFirefoxVersion();
-
-        log(
-            `Firefox ${firefoxVersion} 安装完成`
-        );
-
-    } finally {
-
-        installing = false;
     }
+
+    try {
+
+        fs.chmodSync(
+            FIREFOX_EXECUTABLE,
+            0o755
+        );
+
+    } catch (_) {}
+
+    inspectFirefox();
+
+    log(
+        "Firefox 实际可执行文件：",
+        FIREFOX_EXECUTABLE
+    );
 }
 
-/* ============================================================
- * 检测 Firefox 版本
- * ============================================================ */
 
-async function detectFirefoxVersion() {
+// ============================================================
+// 获取 Firefox 版本
+// ============================================================
 
-    if (!firefoxPath) {
-        return;
-    }
+function getFirefoxVersion() {
 
     try {
 
         const result =
-            await execFileAsync(
-                firefoxPath,
+            execFileSync(
+                FIREFOX_EXECUTABLE,
                 [
-                    '--version'
+                    "--version"
                 ],
                 {
-                    timeout: 30000
+                    encoding:
+                        "utf8",
+                    timeout:
+                        15000,
+                    env: {
+                        ...process.env,
+                        HOME: "/tmp"
+                    }
                 }
             );
 
-        const output =
-            `${result.stdout || ''}${result.stderr || ''}`
-                .trim();
-
-        const match =
-            output.match(
-                /Firefox\s+([0-9.]+)/
-            );
-
-        if (match) {
-
-            firefoxVersion =
-                match[1];
-
-        } else if (output) {
-
-            firefoxVersion =
-                output;
-        }
+        return result.trim();
 
     } catch (error) {
 
         log(
-            '获取 Firefox 版本失败：',
+            "Firefox --version 失败"
+        );
+
+        if (
+            error.stdout
+        ) {
+            log(
+                "stdout：",
+                error.stdout.toString()
+            );
+        }
+
+        if (
+            error.stderr
+        ) {
+            log(
+                "stderr：",
+                error.stderr.toString()
+            );
+        }
+
+        log(
+            "错误：",
             error.message
         );
+
+        return null;
     }
 }
 
-/* ============================================================
- * 启动 Firefox
- * ============================================================ */
 
-async function startFirefox() {
+// ============================================================
+// 启动 Firefox
+// ============================================================
 
-    if (firefoxRunning) {
+function startFirefox() {
+
+    if (
+        firefoxProcess &&
+        !firefoxProcess.killed
+    ) {
+
+        log(
+            "Firefox 已经启动"
+        );
+
         return;
     }
 
-    try {
+    if (
+        !fs.existsSync(
+            FIREFOX_EXECUTABLE
+        )
+    ) {
 
-        if (!firefoxPath) {
+        throw new Error(
+            "Firefox executable 不存在"
+        );
+    }
 
-            firefoxPath =
-                findFirefoxExecutable(
-                    FIREFOX_DIR
-                );
+    fs.mkdirSync(
+        PROFILE_DIR,
+        {
+            recursive: true
         }
+    );
 
-        if (!firefoxPath) {
+    const args = [
+        "--headless",
+        "--no-remote",
+        "--profile",
+        PROFILE_DIR,
+        "--width",
+        "1280",
+        "--height",
+        "720",
+        "about:blank"
+    ];
 
-            await installFirefox();
+    log(
+        "正在启动 Firefox Headless..."
+    );
 
-            firefoxPath =
-                findFirefoxExecutable(
-                    FIREFOX_DIR
-                );
-        }
+    log(
+        "Firefox 文件路径：",
+        FIREFOX_EXECUTABLE
+    );
 
-        if (!firefoxPath) {
+    log(
+        "启动参数：",
+        JSON.stringify(args)
+    );
 
-            throw new Error(
-                '安装后仍然找不到 Firefox'
-            );
-        }
-
-        // ----------------------------------------------------
-        // 确保 profile 存在
-        // ----------------------------------------------------
-
-        fs.mkdirSync(
-            PROFILE_DIR,
+    firefoxProcess =
+        spawn(
+            FIREFOX_EXECUTABLE,
+            args,
             {
-                recursive: true
+                cwd:
+                    FIREFOX_DIR,
+                env: {
+                    ...process.env,
+
+                    HOME:
+                        "/tmp",
+
+                    MOZ_HEADLESS:
+                        "1",
+
+                    DISPLAY:
+                        ""
+                },
+                stdio: [
+                    "ignore",
+                    "pipe",
+                    "pipe"
+                ]
             }
         );
 
-        log(
-            'Firefox 文件路径：',
-            firefoxPath
-        );
+    firefoxState.running =
+        true;
 
-        log(
-            '正在启动 Firefox Headless...'
-        );
+    firefoxState.error =
+        null;
 
-        const args = [
-            '--headless',
-            '--no-remote',
-            '--profile',
-            PROFILE_DIR,
-            '--width',
-            '1280',
-            '--height',
-            '720',
-            'about:blank'
-        ];
+    firefoxState.pid =
+        firefoxProcess.pid;
 
-        log(
-            '启动参数：',
-            JSON.stringify(args)
-        );
+    firefoxState.startedAt =
+        new Date().toISOString();
 
-        firefoxProcess =
-            spawn(
-                firefoxPath,
-                args,
+    firefoxProcess.stdout.on(
+        "data",
+        data => {
+
+            console.log(
+                "[Firefox stdout]",
+                data.toString()
+            );
+        }
+    );
+
+    firefoxProcess.stderr.on(
+        "data",
+        data => {
+
+            console.log(
+                "[Firefox stderr]",
+                data.toString()
+            );
+        }
+    );
+
+    firefoxProcess.on(
+        "error",
+        error => {
+
+            firefoxState.running =
+                false;
+
+            firefoxState.error =
+                error.message;
+
+            log(
+                "Firefox 启动失败：",
+                error
+            );
+
+            if (
+                error.code === "ENOENT"
+            ) {
+
+                log("");
+                log(
+                    "======================================"
+                );
+                log(
+                    "Firefox ENOENT 诊断"
+                );
+                log(
+                    "======================================"
+                );
+
+                log(
+                    "文件：",
+                    FIREFOX_EXECUTABLE
+                );
+
+                log(
+                    "exists：",
+                    fs.existsSync(
+                        FIREFOX_EXECUTABLE
+                    )
+                );
+
+                log(
+                    "目录：",
+                    FIREFOX_DIR
+                );
+
+                log(
+                    "系统：",
+                    os.platform(),
+                    os.arch()
+                );
+
+                log(
+                    "注意："
+                );
+
+                log(
+                    "如果文件存在但 spawn 仍然 ENOENT，"
+                );
+
+                log(
+                    "通常意味着 ELF 动态加载器或依赖库缺失。"
+                );
+
+                inspectFirefox();
+            }
+        }
+    );
+
+    firefoxProcess.on(
+        "exit",
+        (
+            code,
+            signal
+        ) => {
+
+            firefoxState.running =
+                false;
+
+            firefoxState.pid =
+                null;
+
+            log(
+                "Firefox 退出：",
                 {
-                    detached: false,
-                    stdio: [
-                        'ignore',
-                        'pipe',
-                        'pipe'
-                    ],
-                    env: {
-                        ...process.env,
-                        HOME: APP_DIR,
-                        DISPLAY: ''
-                    }
+                    code,
+                    signal
                 }
             );
 
-        firefoxProcess.stdout.on(
-            'data',
-            data => {
-                console.log(
-                    '[Firefox stdout]',
-                    data.toString().trim()
-                );
+            firefoxProcess =
+                null;
+        }
+    );
+
+    log(
+        "Firefox Headless 启动命令已经执行"
+    );
+}
+
+
+// ============================================================
+// HTTP API
+// ============================================================
+
+function sendJSON(
+    response,
+    status,
+    data
+) {
+
+    const body =
+        JSON.stringify(
+            data,
+            null,
+            2
+        );
+
+    response.writeHead(
+        status,
+        {
+            "Content-Type":
+                "application/json; charset=utf-8",
+
+            "Content-Length":
+                Buffer.byteLength(
+                    body
+                ),
+
+            "Cache-Control":
+                "no-store"
+        }
+    );
+
+    response.end(
+        body
+    );
+}
+
+
+function serverHandler(
+    request,
+    response
+) {
+
+    const url =
+        new URL(
+            request.url,
+            "http://127.0.0.1"
+        );
+
+    if (
+        url.pathname === "/"
+    ) {
+
+        sendJSON(
+            response,
+            200,
+            {
+                status: "ok",
+                browser: "Firefox",
+                version:
+                    FIREFOX_VERSION,
+                running:
+                    firefoxState.running,
+                port: PORT,
+                executable:
+                    FIREFOX_EXECUTABLE,
+                architecture:
+                    process.arch,
+                node:
+                    process.version,
+                profile:
+                    PROFILE_DIR,
+                pid:
+                    firefoxState.pid,
+                startedAt:
+                    firefoxState.startedAt,
+                error:
+                    firefoxState.error
             }
         );
 
-        firefoxProcess.stderr.on(
-            'data',
-            data => {
-                console.log(
-                    '[Firefox stderr]',
-                    data.toString().trim()
-                );
+        return;
+    }
+
+    if (
+        url.pathname === "/health"
+    ) {
+
+        sendJSON(
+            response,
+            firefoxState.running
+                ? 200
+                : 503,
+            {
+                status:
+                    firefoxState.running
+                        ? "running"
+                        : "stopped",
+                browser:
+                    "Firefox",
+                version:
+                    FIREFOX_VERSION,
+                pid:
+                    firefoxState.pid,
+                error:
+                    firefoxState.error
             }
         );
 
-        firefoxProcess.on(
-            'error',
-            error => {
+        return;
+    }
 
-                firefoxRunning = false;
+    if (
+        url.pathname === "/version"
+    ) {
 
-                firefoxError =
-                    error.message;
-
-                log(
-                    '启动 Firefox 失败：',
-                    error
-                );
+        sendJSON(
+            response,
+            200,
+            {
+                firefox:
+                    getFirefoxVersion(),
+                executable:
+                    FIREFOX_EXECUTABLE
             }
         );
 
-        firefoxProcess.on(
-            'exit',
-            (code, signal) => {
+        return;
+    }
 
-                firefoxRunning = false;
+    if (
+        url.pathname === "/restart"
+    ) {
 
-                log(
-                    `Firefox 退出 code=${code} signal=${signal}`
+        try {
+
+            if (
+                firefoxProcess
+            ) {
+
+                firefoxProcess.kill(
+                    "SIGTERM"
                 );
-
-                firefoxProcess = null;
             }
+
+            setTimeout(
+                () => {
+
+                    try {
+
+                        startFirefox();
+
+                    } catch (error) {
+
+                        log(
+                            "重启 Firefox 失败：",
+                            error.message
+                        );
+                    }
+
+                },
+                1000
+            );
+
+            sendJSON(
+                response,
+                200,
+                {
+                    status:
+                        "restart requested"
+                }
+            );
+
+        } catch (error) {
+
+            sendJSON(
+                response,
+                500,
+                {
+                    status:
+                        "error",
+                    error:
+                        error.message
+                }
+            );
+        }
+
+        return;
+    }
+
+    sendJSON(
+        response,
+        404,
+        {
+            status:
+                "not found"
+        }
+    );
+}
+
+
+// ============================================================
+// 启动 HTTP
+// ============================================================
+
+async function main() {
+
+    console.log("");
+    console.log(
+        "======================================"
+    );
+    console.log(
+        "Firefox + Unikraft Cloud"
+    );
+    console.log(
+        "======================================"
+    );
+
+    log(
+        "Node.js：",
+        process.version
+    );
+
+    log(
+        "架构：",
+        process.arch
+    );
+
+    log(
+        "平台：",
+        process.platform
+    );
+
+    log(
+        "Firefox 版本：",
+        FIREFOX_VERSION
+    );
+
+    log(
+        "Firefox 目录：",
+        FIREFOX_DIR
+    );
+
+    log(
+        "Profile：",
+        PROFILE_DIR
+    );
+
+    log(
+        "PORT：",
+        PORT
+    );
+
+    // --------------------------------------------------------
+    // HTTP 先启动
+    // --------------------------------------------------------
+
+    const server =
+        http.createServer(
+            serverHandler
         );
 
-        firefoxRunning = true;
+    server.listen(
+        PORT,
+        "0.0.0.0",
+        () => {
 
-        firefoxError = null;
+            log(
+                "HTTP 服务监听：0.0.0.0:" +
+                PORT
+            );
+        }
+    );
 
-        log(
-            'Firefox Headless 启动命令已经执行'
-        );
+    // --------------------------------------------------------
+    // 安装 Firefox
+    // --------------------------------------------------------
+
+    try {
+
+        await installFirefox();
+
+        const version =
+            getFirefoxVersion();
+
+        if (version) {
+
+            log(
+                "Firefox 实际版本：",
+                version
+            );
+
+        }
 
     } catch (error) {
 
-        firefoxRunning = false;
-
-        firefoxError =
+        firefoxState.error =
             error.message;
 
         log(
-            '启动失败：',
+            "Firefox 安装失败：",
+            error
+        );
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // 启动 Firefox
+    // --------------------------------------------------------
+
+    try {
+
+        startFirefox();
+
+    } catch (error) {
+
+        firefoxState.running =
+            false;
+
+        firefoxState.error =
+            error.message;
+
+        log(
+            "Firefox 启动失败：",
             error
         );
     }
 }
 
-/* ============================================================
- * Firefox 状态
- * ============================================================ */
 
-function getStatus() {
+// ============================================================
+// SIGTERM / SIGINT
+// ============================================================
 
-    return {
-        status: 'ok',
-        browser: 'Firefox',
-        version: firefoxVersion,
-        running: firefoxRunning,
-        port: PORT,
-        executable:
-            firefoxPath || null,
-        architecture:
-            os.arch(),
-        node:
-            process.version,
-        profile:
-            PROFILE_DIR,
-        error:
-            firefoxError
-    };
-}
-
-/* ============================================================
- * HTTP 服务
- * ============================================================ */
-
-const server =
-    http.createServer(
-        async (req, res) => {
-
-            const url =
-                new URL(
-                    req.url,
-                    `http://${req.headers.host || 'localhost'}`
-                );
-
-            // ------------------------------------------------
-            // CORS
-            // ------------------------------------------------
-
-            res.setHeader(
-                'Access-Control-Allow-Origin',
-                '*'
-            );
-
-            res.setHeader(
-                'Content-Type',
-                'application/json; charset=utf-8'
-            );
-
-            // ------------------------------------------------
-            // 首页
-            // ------------------------------------------------
-
-            if (
-                url.pathname === '/' ||
-                url.pathname === '/status'
-            ) {
-
-                res.writeHead(200);
-
-                res.end(
-                    JSON.stringify(
-                        getStatus(),
-                        null,
-                        2
-                    )
-                );
-
-                return;
-            }
-
-            // ------------------------------------------------
-            // Health check
-            // ------------------------------------------------
-
-            if (url.pathname === '/health') {
-
-                const healthy =
-                    firefoxRunning;
-
-                res.writeHead(
-                    healthy ? 200 : 503
-                );
-
-                res.end(
-                    JSON.stringify(
-                        {
-                            status:
-                                healthy
-                                    ? 'ok'
-                                    : 'starting',
-                            firefox:
-                                firefoxRunning
-                        },
-                        null,
-                        2
-                    )
-                );
-
-                return;
-            }
-
-            // ------------------------------------------------
-            // 启动 Firefox
-            // ------------------------------------------------
-
-            if (
-                url.pathname === '/start'
-            ) {
-
-                await startFirefox();
-
-                res.writeHead(200);
-
-                res.end(
-                    JSON.stringify(
-                        getStatus(),
-                        null,
-                        2
-                    )
-                );
-
-                return;
-            }
-
-            // ------------------------------------------------
-            // 404
-            // ------------------------------------------------
-
-            res.writeHead(404);
-
-            res.end(
-                JSON.stringify(
-                    {
-                        error:
-                            'Not Found'
-                    }
-                )
-            );
-        }
-    );
-
-/* ============================================================
- * 启动 HTTP
- * ============================================================ */
-
-server.listen(
-    PORT,
-    '0.0.0.0',
-    () => {
-
-        console.log(
-            '======================================'
-        );
-
-        console.log(
-            'Firefox + Unikraft Cloud'
-        );
-
-        console.log(
-            '======================================'
-        );
-
-        log(
-            'HTTP 服务监听：0.0.0.0:' + PORT
-        );
-
-        log(
-            '架构：',
-            os.arch()
-        );
-
-        log(
-            'Node.js：',
-            process.version
-        );
-
-        log(
-            'Firefox 目录：',
-            FIREFOX_DIR
-        );
-
-        log(
-            'Profile：',
-            PROFILE_DIR
-        );
-
-        // ----------------------------------------------------
-        // HTTP 服务启动后再安装 Firefox
-        // 不阻塞端口
-        // ----------------------------------------------------
-
-        setTimeout(
-            async () => {
-
-                try {
-
-                    await installFirefox();
-
-                    await startFirefox();
-
-                } catch (error) {
-
-                    firefoxError =
-                        error.message;
-
-                    log(
-                        'Firefox 初始化失败：',
-                        error
-                    );
-
-                    // 不退出 Node
-                    // 保证 Unikraft 实例不会因为 Firefox
-                    // 初始化失败而直接停止
-
-                }
-
-            },
-            500
-        );
-    }
-);
-
-/* ============================================================
- * 防止异常导致 Node 直接退出
- * ============================================================ */
-
-process.on(
-    'uncaughtException',
-    error => {
-
-        firefoxError =
-            error.message;
-
-        console.error(
-            '[Firefox] uncaughtException:',
-            error
-        );
-    }
-);
-
-process.on(
-    'unhandledRejection',
-    error => {
-
-        firefoxError =
-            error && error.message
-                ? error.message
-                : String(error);
-
-        console.error(
-            '[Firefox] unhandledRejection:',
-            error
-        );
-    }
-);
-
-/* ============================================================
- * 优雅退出
- * ============================================================ */
-
-function shutdown(signal) {
+function shutdown(
+    signal
+) {
 
     log(
-        `收到 ${signal}，正在关闭...`
+        "收到 %s，正在关闭...",
+        signal
     );
 
-    if (firefoxProcess) {
+    if (
+        firefoxProcess
+    ) {
 
         try {
+
             firefoxProcess.kill(
-                'SIGTERM'
+                "SIGTERM"
             );
+
         } catch (_) {}
     }
 
-    server.close(
-        () => {
-            process.exit(0);
-        }
-    );
-
-    setTimeout(
-        () => process.exit(0),
-        3000
+    process.exit(
+        0
     );
 }
 
+
 process.on(
-    'SIGTERM',
-    () => shutdown('SIGTERM')
+    "SIGTERM",
+    () => shutdown("SIGTERM")
 );
 
 process.on(
-    'SIGINT',
-    () => shutdown('SIGINT')
+    "SIGINT",
+    () => shutdown("SIGINT")
+);
+
+
+process.on(
+    "uncaughtException",
+    error => {
+
+        console.error(
+            "[Fatal]",
+            error
+        );
+    }
+);
+
+
+process.on(
+    "unhandledRejection",
+    error => {
+
+        console.error(
+            "[Unhandled]",
+            error
+        );
+    }
+);
+
+
+// ============================================================
+// 启动
+// ============================================================
+
+main().catch(
+    error => {
+
+        console.error(
+            "[Fatal]",
+            error
+        );
+    }
 );
