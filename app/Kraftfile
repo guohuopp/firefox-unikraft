@@ -3,11 +3,9 @@ spec: v0.7
 runtime: base-compat:latest
 
 rootfs:
-  source: ./Dockerfile
+  source: ../_build/rootfs
   format: erofs
 
-cmd: ["/usr/bin/node", "/app/index.js"]
-
-env:
-  PORT: "3000"
-  HOME: "/app"
+cmd:
+  - /bin/sh
+  - /app/start.sh
