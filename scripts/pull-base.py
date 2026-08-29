@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import urllib.request
-import urllib.error
 
 
 ACCEPT = ",".join([
@@ -16,25 +15,18 @@ ACCEPT = ",".join([
 ])
 
 
-def request_json(url, token=None):
-    request = urllib.request.Request(url)
-
-    request.add_header("Accept", ACCEPT)
+def fetch_json(url, token=None):
+    req = urllib.request.Request(url)
+    req.add_header("Accept", ACCEPT)
 
     if token:
-        request.add_header(
+        req.add_header(
             "Authorization",
             "Bearer " + token
         )
 
-    with urllib.request.urlopen(
-        request,
-        timeout=120
-    ) as response:
-
-        return json.loads(
-            response.read()
-        )
+    with urllib.request.urlopen(req, timeout=120) as response:
+        return json.loads(response.read())
 
 
 def get_docker_token(repo):
@@ -45,186 +37,71 @@ def get_docker_token(repo):
         % repo
     )
 
-    print("获取 Docker Hub Token...")
+    data = fetch_json(url)
 
-    data = request_json(url)
-
-    token = data.get("token")
-
-    if not token:
-        raise RuntimeError(
-            "无法获取 Docker Hub Token"
-        )
-
-    return token
+    return data["token"]
 
 
-def download_blob(
-    registry,
-    repo,
-    digest,
-    token,
-    output
-):
-
-    url = (
-        "%s/v2/%s/blobs/%s"
-        % (
-            registry,
-            repo,
-            digest
-        )
-    )
-
-    request = urllib.request.Request(url)
+def download_blob(url, token, output):
+    headers = {}
 
     if token:
-        request.add_header(
-            "Authorization",
-            "Bearer " + token
-        )
+        headers["Authorization"] = "Bearer " + token
 
-    print("")
-    print("下载：%s" % digest)
+    request = urllib.request.Request(
+        url,
+        headers=headers
+    )
 
     with urllib.request.urlopen(
         request,
-        timeout=900
+        timeout=600
     ) as response:
 
-        total = 0
-
-        with open(
-            output,
-            "wb"
-        ) as file:
+        with open(output, "wb") as file:
 
             while True:
-
-                chunk = response.read(
-                    1024 * 1024
-                )
+                chunk = response.read(1024 * 1024)
 
                 if not chunk:
                     break
 
                 file.write(chunk)
 
-                total += len(chunk)
 
-    print(
-        "下载完成：%d bytes"
-        % total
-    )
-
-
-def extract_layer(
-    archive,
-    destination
-):
-
-    print(
-        "解包：%s"
-        % os.path.basename(archive)
-    )
-
+def extract_layer(layer_file, destination):
     result = subprocess.run(
         [
             "tar",
             "-xzf",
-            archive,
+            layer_file,
             "-C",
             destination
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
+        stderr=subprocess.PIPE
     )
 
     if result.returncode != 0:
-
         print(
-            "tar 解包失败："
-        )
-
-        print(
-            result.stderr
+            result.stderr.decode(
+                "utf-8",
+                errors="ignore"
+            )
         )
 
         raise RuntimeError(
-            "Docker layer 解包失败"
+            "解压 Docker layer 失败"
         )
-
-
-def select_amd64(manifest):
-
-    manifests = manifest.get(
-        "manifests",
-        []
-    )
-
-    for item in manifests:
-
-        platform = item.get(
-            "platform",
-            {}
-        )
-
-        architecture = platform.get(
-            "architecture"
-        )
-
-        operating_system = platform.get(
-            "os"
-        )
-
-        annotations = item.get(
-            "annotations",
-            {}
-        )
-
-        reference_type = annotations.get(
-            "vnd.docker.reference.type"
-        )
-
-        if (
-            operating_system == "linux"
-            and
-            architecture == "amd64"
-            and
-            reference_type != "attestation-manifest"
-        ):
-
-            return item.get(
-                "digest"
-            )
-
-    return None
 
 
 def main():
 
     if len(sys.argv) < 4:
-
         print(
             "用法："
+            "pull-base.py <repo> <tag> <dest>"
         )
-
-        print(
-            "python3 scripts/pull-base.py "
-            "<repo> <tag> <dest>"
-        )
-
-        print("")
-        print(
-            "例如："
-        )
-
-        print(
-            "python3 scripts/pull-base.py "
-            "library/node 20-alpine _build/rootfs"
-        )
-
         sys.exit(1)
 
     repo = sys.argv[1]
@@ -232,74 +109,32 @@ def main():
     destination = sys.argv[3]
 
     registry = (
-        "https://registry-1.docker.io"
+        sys.argv[4]
+        if len(sys.argv) >= 5
+        else "https://registry-1.docker.io"
     )
 
-    print("")
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print("下载 Docker 基础镜像")
+    print("======================================")
 
-    print(
-        "Docker 基础镜像下载器"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        "镜像：%s:%s"
-        % (
-            repo,
-            tag
-        )
-    )
-
-    print(
-        "平台：linux/amd64"
-    )
-
-    print(
-        "目标：%s"
-        % destination
-    )
-
-    print(
-        "======================================"
-    )
+    print("仓库：", repo)
+    print("版本：", tag)
+    print("目标：", destination)
+    print("Registry：", registry)
 
     os.makedirs(
         destination,
         exist_ok=True
     )
 
-    # --------------------------------------
-    # 获取 Docker Hub Token
-    # --------------------------------------
+    token = None
 
-    try:
+    if "registry-1.docker.io" in registry:
 
-        token = get_docker_token(
-            repo
-        )
+        print("获取 Docker Hub Token...")
 
-    except Exception as error:
-
-        print("")
-        print(
-            "获取 Docker Hub Token 失败："
-        )
-
-        print(
-            str(error)
-        )
-
-        sys.exit(1)
-
-    # --------------------------------------
-    # 获取镜像 Manifest
-    # --------------------------------------
+        token = get_docker_token(repo)
 
     manifest_url = (
         "%s/v2/%s/manifests/%s"
@@ -310,46 +145,53 @@ def main():
         )
     )
 
-    print("")
-    print(
-        "获取镜像 Manifest..."
+    print("获取镜像 Manifest...")
+
+    manifest = fetch_json(
+        manifest_url,
+        token
     )
 
-    try:
-
-        manifest = request_json(
-            manifest_url,
-            token
-        )
-
-    except Exception as error:
-
-        print("")
-        print(
-            "获取 Manifest 失败："
-        )
-
-        print(
-            str(error)
-        )
-
-        sys.exit(1)
-
-    # --------------------------------------
     # 多架构镜像
-    # --------------------------------------
-
     if "manifests" in manifest:
 
-        print(
-            "检测到多架构镜像"
-        )
+        selected_digest = None
 
-        digest = select_amd64(
-            manifest
-        )
+        for item in manifest["manifests"]:
 
-        if not digest:
+            platform = item.get(
+                "platform",
+                {}
+            )
+
+            annotations = item.get(
+                "annotations",
+                {}
+            )
+
+            architecture = platform.get(
+                "architecture"
+            )
+
+            operating_system = platform.get(
+                "os"
+            )
+
+            reference_type = annotations.get(
+                "vnd.docker.reference.type"
+            )
+
+            if (
+                operating_system == "linux"
+                and architecture == "amd64"
+                and reference_type != "attestation-manifest"
+            ):
+
+                selected_digest = item["digest"]
+
+                break
+
+        if not selected_digest:
 
             print(
                 "错误：没有找到 linux/amd64 镜像"
@@ -358,8 +200,8 @@ def main():
             sys.exit(1)
 
         print(
-            "选择 amd64：%s"
-            % digest
+            "选择 linux/amd64：",
+            selected_digest
         )
 
         manifest_url = (
@@ -367,32 +209,14 @@ def main():
             % (
                 registry,
                 repo,
-                digest
+                selected_digest
             )
         )
 
-        try:
-
-            manifest = request_json(
-                manifest_url,
-                token
-            )
-
-        except Exception as error:
-
-            print(
-                "获取 amd64 Manifest 失败："
-            )
-
-            print(
-                str(error)
-            )
-
-            sys.exit(1)
-
-    # --------------------------------------
-    # 获取 layers
-    # --------------------------------------
+        manifest = fetch_json(
+            manifest_url,
+            token
+        )
 
     layers = manifest.get(
         "layers",
@@ -402,81 +226,62 @@ def main():
     if not layers:
 
         print(
-            "错误：Manifest 中没有 layers"
+            "错误：镜像没有 layers"
         )
 
         sys.exit(1)
 
-    print("")
     print(
-        "Layer 数量：%d"
-        % len(layers)
+        "Layer 数量：",
+        len(layers)
     )
-
-    # --------------------------------------
-    # 下载并解包 layers
-    # --------------------------------------
 
     for index, layer in enumerate(
         layers,
         start=1
     ):
 
-        digest = layer.get(
-            "digest"
-        )
-
-        if not digest:
-
-            print(
-                "错误：Layer 没有 digest"
-            )
-
-            sys.exit(1)
-
-        safe_digest = digest.replace(
-            ":",
-            "_"
-        )
-
-        temporary_file = (
-            "/tmp/"
-            "unikraft-layer-%d-%s.tar.gz"
-            % (
-                index,
-                safe_digest
-            )
-        )
+        digest = layer["digest"]
 
         print("")
         print(
-            "======================================"
-        )
-
-        print(
-            "Layer %d/%d"
+            "下载 Layer %d/%d：%s"
             % (
                 index,
-                len(layers)
+                len(layers),
+                digest
             )
         )
 
-        print(
-            "大小：%d bytes"
-            % layer.get(
-                "size",
-                0
+        blob_url = (
+            "%s/v2/%s/blobs/%s"
+            % (
+                registry,
+                repo,
+                digest
             )
+        )
+
+        temporary_file = (
+            "/tmp/unikraft-layer-%d.tar.gz"
+            % index
         )
 
         try:
 
             download_blob(
-                registry,
-                repo,
-                digest,
+                blob_url,
                 token,
                 temporary_file
+            )
+
+            size = os.path.getsize(
+                temporary_file
+            )
+
+            print(
+                "下载完成：%d bytes"
+                % size
             )
 
             extract_layer(
@@ -484,78 +289,29 @@ def main():
                 destination
             )
 
+            print(
+                "Layer %d/%d 解压完成"
+                % (
+                    index,
+                    len(layers)
+                )
+            )
+
         finally:
 
             if os.path.exists(
                 temporary_file
             ):
-
                 os.remove(
                     temporary_file
                 )
 
-        print(
-            "Layer %d/%d 完成"
-            % (
-                index,
-                len(layers)
-            )
-        )
-
-    # --------------------------------------
-    # 完成
-    # --------------------------------------
-
     print("")
-    print(
-        "======================================"
-    )
-
-    print(
-        "rootfs 准备完成"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        "位置：%s"
-        % destination
-    )
-
-    # --------------------------------------
-    # 检查 Node
-    # --------------------------------------
-
-    node_path = os.path.join(
-        destination,
-        "usr",
-        "local",
-        "bin",
-        "node"
-    )
-
-    if os.path.exists(
-        node_path
-    ):
-
-        print(
-            "Node.js：已找到"
-        )
-
-    else:
-
-        print(
-            "警告：没有检测到 /usr/local/bin/node"
-        )
-
-    print("")
-    print(
-        "基础镜像下载完成"
-    )
+    print("======================================")
+    print("rootfs 准备完成")
+    print("======================================")
+    print(destination)
 
 
 if __name__ == "__main__":
-
     main()
