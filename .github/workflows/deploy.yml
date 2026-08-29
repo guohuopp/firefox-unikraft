@@ -1,6 +1,120 @@
-      # ==========================================
+name: Firefox 部署到 Unikraft Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "部署区域"
+        required: true
+        default: "sfo"
+        type: choice
+        options:
+          - sfo
+          - fra
+          - sin
+
+      app_name:
+        description: "应用名称（可选，留空自动生成）"
+        required: false
+        default: ""
+
+      memory:
+        description: "内存 MB"
+        required: true
+        default: "1024"
+        type: choice
+        options:
+          - "512"
+          - "1024"
+          - "1536"
+          - "2048"
+
+env:
+  PORT: "3000"
+
+jobs:
+  deploy:
+    name: Firefox / Unikraft
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ==========================================================
+      # 1. 获取仓库代码
+      # ==========================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ==========================================================
+      # 2. 安装 Unikraft CLI
+      # ==========================================================
+
+      - name: 安装 Unikraft CLI
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "安装 Unikraft CLI"
+          echo "======================================"
+
+          INSTALL_SCRIPT="https://unikraft.com/cli/install.sh"
+
+          echo "下载 CLI 安装脚本..."
+
+          curl -fL --retry 5 --retry-delay 3 \
+            "$INSTALL_SCRIPT" \
+            -o /tmp/unikraft-install.sh
+
+          chmod +x /tmp/unikraft-install.sh
+
+          echo "执行安装..."
+
+          /tmp/unikraft-install.sh
+
+          # 常见安装位置
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.unikraft/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.unikraft/bin:$PATH"
+
+          echo ""
+          echo "检查 unikraft..."
+
+          if command -v unikraft >/dev/null 2>&1; then
+            echo "CLI：$(command -v unikraft)"
+          else
+            echo "❌ 找不到 unikraft CLI"
+            echo ""
+            echo "搜索 CLI 文件："
+
+            find "$HOME" \
+              -type f \
+              -name "unikraft" \
+              -perm -111 \
+              2>/dev/null \
+              | head -20 || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "CLI 版本："
+
+          unikraft version || unikraft --version
+
+          echo ""
+          echo "======================================"
+          echo "Unikraft CLI 安装成功"
+          echo "======================================"
+
+
+      # ==========================================================
       # 3. 设置部署参数
-      # ==========================================
+      # ==========================================================
 
       - name: 设置部署参数
         shell: bash
@@ -15,8 +129,14 @@
           MEMORY="${{ github.event.inputs.memory }}"
           INPUT_NAME="${{ github.event.inputs.app_name }}"
 
-          # 不使用 /dev/urandom | tr | head
-          # 避免 GitHub Actions 出现 SIGPIPE / Broken pipe
+          # ======================================================
+          # 这里故意不使用：
+          #
+          # /dev/urandom | tr ... | head
+          #
+          # 避免 GitHub Actions 出现 Broken pipe / SIGPIPE
+          # ======================================================
+
           RANDOM_NAME="$(date +%s%N | sha256sum | cut -c1-8)"
 
           if [ -n "$INPUT_NAME" ]; then
@@ -33,17 +153,13 @@
 
           fi
 
-          # 防止名称为空
           if [ -z "$APP_NAME" ]; then
             APP_NAME="firefox-${RANDOM_NAME}"
           fi
 
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
-
           echo "REGION=$REGION" >> "$GITHUB_ENV"
-
           echo "MEMORY=$MEMORY" >> "$GITHUB_ENV"
-
           echo "PORT=3000" >> "$GITHUB_ENV"
 
           echo ""
@@ -53,4 +169,351 @@
           echo "端口：3000"
           echo ""
           echo "参数设置完成"
+          echo "======================================"
+
+
+      # ==========================================================
+      # 4. 登录 Unikraft Cloud
+      # ==========================================================
+
+      - name: 登录 Unikraft Cloud
+        shell: bash
+        env:
+          UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "登录 Unikraft Cloud"
+          echo "======================================"
+
+          if [ -z "$UNIKRAFT_API_TOKEN" ]; then
+            echo "❌ 缺少 UNIKRAFT_API_TOKEN"
+            echo ""
+            echo "GitHub:"
+            echo "Settings"
+            echo "→ Secrets and variables"
+            echo "→ Actions"
+            echo ""
+            echo "添加 Secret："
+            echo "UNIKRAFT_API_TOKEN"
+            exit 1
+          fi
+
+          echo "Token 已读取"
+
+          # 尝试解析组织名称
+          ORG=""
+
+          ORG="$(printf '%s' "$UNIKRAFT_API_TOKEN" \
+            | base64 -d 2>/dev/null \
+            | cut -d: -f1 \
+            | sed 's/^robot\$//' \
+            | sed 's/\.users\.kraftcloud$//' \
+            || true)"
+
+          if [ -n "$ORG" ]; then
+            echo "认证组织：$ORG"
+
+            printf '%s' "$UNIKRAFT_API_TOKEN" \
+              | unikraft login \
+                --token=- \
+                --organization "$ORG"
+          else
+            echo "无法从 Token 自动解析组织"
+            echo "尝试 Token 登录..."
+
+            printf '%s' "$UNIKRAFT_API_TOKEN" \
+              | unikraft login --token=-
+          fi
+
+          echo ""
+          echo "登录成功"
+
+          unikraft whoami || true
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 5. Firefox 镜像
+      # ==========================================================
+
+      - name: 设置 Firefox 镜像
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Firefox 镜像"
+          echo "======================================"
+
+          FIREFOX_IMAGE="ghcr.io/eooce/firefox:latest"
+
+          echo "镜像：$FIREFOX_IMAGE"
+
+          echo "FIREFOX_IMAGE=$FIREFOX_IMAGE" >> "$GITHUB_ENV"
+
+          echo "Firefox 服务端口：3000"
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 6. 检查并删除旧实例
+      # ==========================================================
+
+      - name: 清理旧实例
+        shell: bash
+        run: |
+          set +e
+
+          echo "======================================"
+          echo "检查旧 Firefox 实例"
+          echo "======================================"
+
+          unikraft instances list -o json \
+            > /tmp/instances.json 2>/dev/null
+
+          if [ -s /tmp/instances.json ]; then
+
+            IDS="$(jq -r \
+              --arg NAME "$APP_NAME" \
+              '.[] |
+              select(.name == $NAME) |
+              .uuid' \
+              /tmp/instances.json 2>/dev/null)"
+
+            if [ -n "$IDS" ]; then
+
+              echo "发现旧实例："
+
+              for ID in $IDS; do
+                echo "删除实例：$ID"
+
+                unikraft instances delete \
+                  "$ID" \
+                  --force \
+                  >/dev/null 2>&1 \
+                  || true
+              done
+
+              sleep 3
+
+            else
+
+              echo "没有旧实例"
+
+            fi
+
+          else
+
+            echo "没有实例信息"
+
+          fi
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 7. 创建 HTTPS 服务
+      # ==========================================================
+
+      - name: 创建 Firefox 服务
+        shell: bash
+        run: |
+          set -e
+
+          SERVICE_NAME="${APP_NAME}-${REGION}"
+
+          echo "======================================"
+          echo "创建 Firefox 服务"
+          echo "======================================"
+
+          echo "地区：$REGION"
+          echo "服务：$SERVICE_NAME"
+
+          echo "SERVICE_NAME=$SERVICE_NAME" >> "$GITHUB_ENV"
+
+          set +e
+
+          OUTPUT="$(unikraft services create \
+            --name "$SERVICE_NAME" \
+            --metro "$REGION" \
+            --services "443:3000/tls+http" \
+            --services "80:443/http+redirect" \
+            2>&1)"
+
+          RESULT=$?
+
+          set -e
+
+          echo "$OUTPUT"
+
+          if [ "$RESULT" -ne 0 ]; then
+
+            if echo "$OUTPUT" | grep -Eiq \
+              "already exists|in use|conflict"; then
+
+              echo "服务已经存在，继续使用"
+
+            else
+
+              echo "❌ 服务创建失败"
+              exit 1
+
+            fi
+
+          else
+
+            echo "服务创建成功"
+
+          fi
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 8. 启动 Firefox 实例
+      # ==========================================================
+
+      - name: 启动 Firefox
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "启动 Firefox"
+          echo "======================================"
+
+          echo "项目：$APP_NAME"
+          echo "地区：$REGION"
+          echo "内存：${MEMORY}MB"
+          echo "端口：3000"
+          echo "镜像：$FIREFOX_IMAGE"
+          echo "服务：$SERVICE_NAME"
+
+          echo ""
+
+          unikraft run \
+            --metro "$REGION" \
+            --name "$APP_NAME" \
+            --memory "${MEMORY}M" \
+            --service "$SERVICE_NAME" \
+            --scale-to-zero policy=off \
+            -e "PORT=3000" \
+            --image "$FIREFOX_IMAGE"
+
+          echo ""
+          echo "实例创建完成"
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 9. 等待实例启动
+      # ==========================================================
+
+      - name: 等待 Firefox
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "等待 Firefox 启动"
+          echo "======================================"
+
+          STARTED=0
+
+          for i in $(seq 1 18); do
+
+            echo ""
+            echo "检查 $i/18"
+
+            DATA="$(unikraft instances list -o json 2>/dev/null || true)"
+
+            echo "$DATA" \
+              | jq -r \
+              --arg NAME "$APP_NAME" \
+              '.[] |
+              select(.name == $NAME) |
+              "地区=\(.metro) 状态=\(.state)"' \
+              || true
+
+            STATE="$(echo "$DATA" \
+              | jq -r \
+              --arg NAME "$APP_NAME" \
+              '.[] |
+              select(.name == $NAME) |
+              .state' \
+              | head -n 1)"
+
+            if [ "$STATE" = "running" ]; then
+              STARTED=1
+              echo ""
+              echo "✅ Firefox 实例正在运行"
+              break
+            fi
+
+            if [ "$STATE" = "stopped" ]; then
+              echo ""
+              echo "❌ Firefox 实例已经停止"
+
+              echo ""
+              echo "最近状态："
+
+              echo "$DATA" \
+                | jq -r \
+                --arg NAME "$APP_NAME" \
+                '.[] |
+                select(.name == $NAME)' \
+                || true
+
+              exit 1
+            fi
+
+            sleep 5
+
+          done
+
+          if [ "$STARTED" != "1" ]; then
+
+            echo ""
+            echo "⚠️ 等待结束，但没有确认 running"
+            echo "继续获取最终信息"
+
+          fi
+
+          echo "======================================"
+
+
+      # ==========================================================
+      # 10. 获取最终访问地址
+      # ==========================================================
+
+      - name: 获取 Firefox 地址
+        shell: bash
+        run: |
+          set -e
+
+          echo ""
+          echo "======================================"
+          echo "Firefox 部署完成"
+          echo "======================================"
+
+          DATA="$(unikraft instances list -o json)"
+
+          echo "$DATA" \
+            | jq -r \
+            --arg NAME "$APP_NAME" \
+            '.[] |
+            select(.name == $NAME) |
+            "地区：\(.metro)
+          状态：\(.state)
+          UUID：\(.uuid)
+          地址：https://\(.domains[0].fqdn // .fqdn // "?")"'
+
+          echo ""
+          echo "======================================"
+          echo "部署信息结束"
           echo "======================================"
