@@ -3,13 +3,8 @@ name: Firefox Unikraft Deploy
 on:
   workflow_dispatch:
     inputs:
-      project_name:
-        description: "Firefox 应用名称"
-        required: true
-        default: "firefox"
-
       region:
-        description: "Unikraft Cloud 地区"
+        description: "部署地区"
         required: true
         default: "sfo"
         type: choice
@@ -17,47 +12,22 @@ on:
           - sfo
           - sin
           - fra
-          - sjc
-          - dal
-          - lhr
-
-      memory:
-        description: "内存"
+      project_name:
+        description: "项目名称"
         required: true
-        default: "1536"
-        type: choice
-        options:
-          - "1024"
-          - "1536"
-          - "2048"
-
-  push:
-    branches:
-      - main
-
-env:
-  PROJECT_NAME: ${{ github.event.inputs.project_name || 'firefox' }}
-  REGIONS: ${{ github.event.inputs.region || 'sfo' }}
-  MEMORY_MB: ${{ github.event.inputs.memory || '1536' }}
-  APP_PORT: "3000"
+        default: "firefox"
 
 jobs:
-
-  prepare:
-
-    name: 准备 Firefox
-
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 检查项目文件
+      - name: 检查项目
         shell: bash
         run: |
-
           set -e
 
           echo "======================================"
@@ -70,7 +40,9 @@ jobs:
 
           echo ""
           echo "项目文件："
-          find . -maxdepth 3 -type f | sort
+          find . -maxdepth 3 -type f \
+            ! -path "./.git/*" \
+            | sort
 
           echo ""
 
@@ -84,189 +56,147 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f "scripts/deploy.sh" ]; then
-            echo "错误：找不到 scripts/deploy.sh"
-            exit 1
-          fi
-
           if [ ! -f "scripts/pull-base.py" ]; then
             echo "错误：找不到 scripts/pull-base.py"
             exit 1
           fi
 
-          echo "Firefox 文件检查通过"
+          if [ ! -f "scripts/deploy.sh" ]; then
+            echo "错误：找不到 scripts/deploy.sh"
+            echo "请确认 scripts/deploy.sh 已经提交到 GitHub"
+            exit 1
+          fi
 
-      - name: 安装 Python
+          echo "项目文件检查通过"
+
+      - name: 安装依赖
         shell: bash
         run: |
-
           set -e
 
-          python3 --version
+          echo "======================================"
+          echo "安装 Node.js"
+          echo "======================================"
 
-      - name: 设置 deploy.sh 权限
+          node --version
+          npm --version
+
+          cd app
+
+          npm install \
+            --omit=dev \
+            --no-audit \
+            --no-fund
+
+          cd ..
+
+          echo "Node.js 依赖安装完成"
+
+      - name: 准备 Firefox rootfs
         shell: bash
+        env:
+          APP_PORT: "3000"
         run: |
-
           set -e
+
+          echo "======================================"
+          echo "准备 Firefox"
+          echo "======================================"
 
           chmod +x scripts/deploy.sh
 
-          echo "deploy.sh 权限："
-          ls -l scripts/deploy.sh
-
-      - name: Prepare
-        shell: bash
-        run: |
-
-          set -e
-
-          export PROJECT_NAME="${PROJECT_NAME}"
-          export REGIONS="${REGIONS}"
-          export MEMORY_MB="${MEMORY_MB}"
-          export APP_PORT="${APP_PORT}"
-
           bash scripts/deploy.sh prepare
-
-
-  build:
-
-    name: 构建 Firefox 镜像
-
-    needs: prepare
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: 安装 Unikraft CLI
         shell: bash
         run: |
-
           set -e
 
           echo "======================================"
           echo "安装 Unikraft CLI"
           echo "======================================"
 
-          curl -fsSL https://raw.githubusercontent.com/unikraft/kraftkit/staging/install.sh \
-            -o /tmp/install-kraft.sh
+          if command -v unikraft >/dev/null 2>&1; then
+            echo "Unikraft CLI 已存在"
+          else
+            echo "从 GitHub Release 安装 Unikraft CLI"
 
-          chmod +x /tmp/install-kraft.sh
+            LATEST_URL=$(
+              curl -fsSL \
+                https://api.github.com/repos/unikraft/cli/releases/latest \
+                | grep '"browser_download_url"' \
+                | grep 'linux-amd64' \
+                | head -n 1 \
+                | cut -d '"' -f 4
+            )
 
-          /tmp/install-kraft.sh
+            if [ -z "$LATEST_URL" ]; then
+              echo "无法获取 Unikraft CLI 下载地址"
+              exit 1
+            fi
 
-          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+            echo "下载：$LATEST_URL"
 
-          if [ -d "$HOME/.unikraft/bin" ]; then
-            export PATH="$HOME/.unikraft/bin:$PATH"
+            mkdir -p "$HOME/.local/bin"
+
+            curl -fL \
+              "$LATEST_URL" \
+              -o /tmp/unikraft-cli
+
+            chmod +x /tmp/unikraft-cli
+
+            install \
+              /tmp/unikraft-cli \
+              "$HOME/.local/bin/unikraft"
+
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+            export PATH="$HOME/.local/bin:$PATH"
           fi
 
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-
-          if [ -d "$HOME/.unikraft/bin" ]; then
-            echo "$HOME/.unikraft/bin" >> "$GITHUB_PATH"
-          fi
+          export PATH="$HOME/.local/bin:$PATH"
 
           echo ""
-          echo "检查 CLI："
-
-          command -v unikraft || command -v kraft
+          echo "Unikraft CLI："
+          command -v unikraft
 
           echo ""
-          echo "CLI 版本："
-
-          unikraft version 2>/dev/null || \
-          unikraft --version 2>/dev/null || \
-          kraft version 2>/dev/null || \
-          kraft --version
+          echo "版本："
+          unikraft version || unikraft --version
 
       - name: 构建 Firefox 镜像
         shell: bash
         env:
           UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
           UNIKRAFT_ORG: ${{ secrets.UNIKRAFT_ORG }}
-          PROJECT_NAME: ${{ env.PROJECT_NAME }}
-          REGIONS: ${{ env.REGIONS }}
-          MEMORY_MB: ${{ env.MEMORY_MB }}
-          APP_PORT: ${{ env.APP_PORT }}
+          PROJECT_NAME: ${{ github.event.inputs.project_name }}
+          APP_PORT: "3000"
         run: |
-
           set -e
 
+          export PATH="$HOME/.local/bin:$PATH"
+
           echo "======================================"
-          echo "构建 Firefox 镜像"
+          echo "构建 Firefox Unikraft 镜像"
           echo "======================================"
 
           chmod +x scripts/deploy.sh
 
           bash scripts/deploy.sh build
 
-
-  deploy:
-
-    name: 部署 Firefox
-
-    needs: build
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: 安装 Unikraft CLI
-        shell: bash
-        run: |
-
-          set -e
-
-          echo "======================================"
-          echo "安装 Unikraft CLI"
-          echo "======================================"
-
-          curl -fsSL https://raw.githubusercontent.com/unikraft/kraftkit/staging/install.sh \
-            -o /tmp/install-kraft.sh
-
-          chmod +x /tmp/install-kraft.sh
-
-          /tmp/install-kraft.sh
-
-          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-
-          if [ -d "$HOME/.unikraft/bin" ]; then
-            export PATH="$HOME/.unikraft/bin:$PATH"
-          fi
-
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-
-          if [ -d "$HOME/.unikraft/bin" ]; then
-            echo "$HOME/.unikraft/bin" >> "$GITHUB_PATH"
-          fi
-
-          echo ""
-          echo "检查 CLI："
-
-          command -v unikraft || command -v kraft
-
       - name: 部署 Firefox
         shell: bash
         env:
           UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
           UNIKRAFT_ORG: ${{ secrets.UNIKRAFT_ORG }}
-          PROJECT_NAME: ${{ env.PROJECT_NAME }}
-          REGIONS: ${{ env.REGIONS }}
-          MEMORY_MB: ${{ env.MEMORY_MB }}
-          APP_PORT: ${{ env.APP_PORT }}
+          PROJECT_NAME: ${{ github.event.inputs.project_name }}
+          REGIONS: ${{ github.event.inputs.region }}
+          MEMORY_MB: "1536"
+          APP_PORT: "3000"
         run: |
-
           set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
 
           echo "======================================"
           echo "部署 Firefox"
