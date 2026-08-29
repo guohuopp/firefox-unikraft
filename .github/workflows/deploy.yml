@@ -5,21 +5,22 @@ on:
     branches:
       - main
       - master
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  KRAFTKIT_NO_WARN_CLOUD_DEPRECATION: "1"
   PROJECT_NAME: firefox
   REGION: sin
   MEMORY: 1536M
   APP_PORT: "3000"
+  KRAFTKIT_NO_WARN_CLOUD_DEPRECATION: "1"
 
 jobs:
 
-  build-and-deploy:
+  deploy:
 
     name: Build and Deploy Firefox
 
@@ -27,16 +28,16 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # 1. Checkout
-      # ============================================================
+      # ==========================================================
+      # 1. 获取代码
+      # ==========================================================
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
+      # ==========================================================
       # 2. 检查项目
-      # ============================================================
+      # ==========================================================
 
       - name: 检查 Firefox 项目
         shell: bash
@@ -53,10 +54,11 @@ jobs:
 
           echo ""
           echo "项目文件："
+
           find . \
             -maxdepth 3 \
             -type f \
-            -not -path './.git/*' \
+            -not -path "./.git/*" \
             | sort
 
           echo ""
@@ -76,22 +78,47 @@ jobs:
             exit 1
           fi
 
+          echo ""
           echo "Firefox 项目检查通过"
 
-      # ============================================================
-      # 3. 安装 Node.js
-      # ============================================================
+      # ==========================================================
+      # 3. 安装 Node.js 24
+      #
+      # 不使用 npm cache
+      #
+      # 避免：
+      # cache-dependency-path
+      # package-lock.json
+      # 路径解析错误
+      # ==========================================================
 
-      - name: 安装 Node.js
+      - name: 安装 Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+          node-version: "24"
 
-      # ============================================================
-      # 4. 安装 Firefox Node.js 依赖
-      # ============================================================
+      # ==========================================================
+      # 4. 检查 Node.js
+      # ==========================================================
+
+      - name: 检查 Node.js
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "检查 Node.js"
+          echo "======================================"
+
+          node --version
+          npm --version
+
+          echo ""
+          echo "Node.js 检查完成"
+
+      # ==========================================================
+      # 5. 安装 Firefox Node.js 依赖
+      # ==========================================================
 
       - name: 安装 Firefox 依赖
         shell: bash
@@ -103,28 +130,44 @@ jobs:
           echo "安装 Firefox Node.js 依赖"
           echo "======================================"
 
-          if [ -f package-lock.json ]; then
-            npm ci --omit=dev --no-audit --no-fund
+          if [ -f "package-lock.json" ]; then
+
+            echo "检测到 package-lock.json"
+
+            npm ci \
+              --omit=dev \
+              --no-audit \
+              --no-fund
+
           else
-            npm install --omit=dev --no-audit --no-fund
+
+            echo "没有 package-lock.json"
+            echo "使用 npm install"
+
+            npm install \
+              --omit=dev \
+              --no-audit \
+              --no-fund
+
           fi
 
           echo ""
-          echo "Node.js 依赖安装完成"
+          echo "依赖安装完成"
 
-      # ============================================================
-      # 5. 安装 KraftKit
+      # ==========================================================
+      # 6. 安装 KraftKit
       #
-      # 不再手动 curl Release 文件。
-      # 使用官方 GitHub Action。
-      # ============================================================
+      # 使用官方 GitHub Action
+      #
+      # 不再自己 curl 下载文件
+      # ==========================================================
 
       - name: 安装 KraftKit
         uses: unikraft/kraftkit@v0.12.15
 
-      # ============================================================
-      # 6. 检查 KraftKit
-      # ============================================================
+      # ==========================================================
+      # 7. 检查 KraftKit
+      # ==========================================================
 
       - name: 检查 KraftKit
         shell: bash
@@ -135,33 +178,57 @@ jobs:
           echo "检查 KraftKit"
           echo "======================================"
 
-          command -v kraft || true
-          command -v unikraft || true
-
           echo ""
-
-          if command -v kraft >/dev/null 2>&1; then
-            echo "kraft："
-            kraft --version || kraft version || true
-          fi
+          echo "PATH："
+          echo "$PATH"
 
           echo ""
 
           if command -v unikraft >/dev/null 2>&1; then
+
             echo "unikraft："
-            unikraft --version || unikraft version || true
+            command -v unikraft
+
+            echo ""
+
+            unikraft --version || \
+            unikraft version || \
+            true
+
           fi
 
           echo ""
 
-          echo "PATH："
-          echo "$PATH"
+          if command -v kraft >/dev/null 2>&1; then
 
-      # ============================================================
-      # 7. 检查 Unikraft Cloud Token
-      # ============================================================
+            echo "kraft："
+            command -v kraft
 
-      - name: 检查 Cloud Token
+            echo ""
+
+            kraft --version || \
+            kraft version || \
+            true
+
+          fi
+
+          if ! command -v unikraft >/dev/null 2>&1 \
+             && ! command -v kraft >/dev/null 2>&1; then
+
+            echo ""
+            echo "错误：没有找到 KraftKit CLI"
+            exit 1
+
+          fi
+
+          echo ""
+          echo "KraftKit 检查完成"
+
+      # ==========================================================
+      # 8. 检查 Unikraft Token
+      # ==========================================================
+
+      - name: 检查 Unikraft Token
         shell: bash
         env:
           UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
@@ -174,36 +241,61 @@ jobs:
           echo "======================================"
 
           if [ -n "${UKC_TOKEN:-}" ]; then
+
             echo "检测到 UKC_TOKEN"
+
           elif [ -n "${UNIKRAFT_API_TOKEN:-}" ]; then
+
             echo "检测到 UNIKRAFT_API_TOKEN"
+
           else
+
             echo ""
             echo "错误：没有设置 Unikraft Cloud Token"
             echo ""
-            echo "请在 GitHub："
-            echo "Settings"
-            echo "→ Secrets and variables"
-            echo "→ Actions"
-            echo "→ New repository secret"
+            echo "请设置 GitHub Secret："
             echo ""
-            echo "创建："
             echo "UKC_TOKEN"
             echo ""
             exit 1
+
           fi
 
-      # ============================================================
-      # 8. 登录 Unikraft Cloud
-      #
-      # 新版 unikraft CLI 不再使用：
-      #
-      # --organization
-      #
-      # 也不使用旧的 kraft cloud 登录方式。
-      #
-      # 这里优先使用 UKC_TOKEN。
-      # ============================================================
+      # ==========================================================
+      # 9. 检查组织
+      # ==========================================================
+
+      - name: 检查 Unikraft 组织
+        shell: bash
+        env:
+          UNIKRAFT_ORG: ${{ vars.UNIKRAFT_ORG }}
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "检查 Unikraft 组织"
+          echo "======================================"
+
+          if [ -z "${UNIKRAFT_ORG:-}" ]; then
+
+            echo ""
+            echo "错误：没有设置 GitHub Repository Variable："
+            echo ""
+            echo "UNIKRAFT_ORG"
+            echo ""
+            echo "例如："
+            echo "ggdbddhg"
+            echo ""
+
+            exit 1
+
+          fi
+
+          echo "Unikraft Organization：${UNIKRAFT_ORG}"
+
+      # ==========================================================
+      # 10. 登录 Unikraft Cloud
+      # ==========================================================
 
       - name: 登录 Unikraft Cloud
         shell: bash
@@ -220,49 +312,52 @@ jobs:
           TOKEN="${UKC_TOKEN:-${UNIKRAFT_API_TOKEN:-}}"
 
           if [ -z "$TOKEN" ]; then
-            echo "错误：Cloud Token 为空"
+            echo "错误：Token 为空"
             exit 1
           fi
 
-          # ========================================================
-          # 新 CLI
-          #
-          # 官方文档说明：
-          # unikraft login
-          #
-          # 这里把 token 放入 stdin，避免 token 出现在命令参数中。
-          # ========================================================
+          # ======================================================
+          # 新版 unikraft CLI
+          # ======================================================
 
           if command -v unikraft >/dev/null 2>&1; then
 
-            echo "使用 unikraft CLI"
+            echo "检测到新版 unikraft CLI"
 
             printf '%s\n' "$TOKEN" \
               | unikraft login --token-stdin
 
-          elif command -v kraft >/dev/null 2>&1; then
-
-            echo "使用 KraftKit CLI"
-
-            export UKC_TOKEN="$TOKEN"
-
-            echo "Cloud token 已设置"
-
           else
 
-            echo "错误：找不到 unikraft 或 kraft"
-            exit 1
+            echo "未找到 unikraft CLI"
+
+            # --------------------------------------------------
+            # 兼容 KraftKit 旧 CLI
+            # --------------------------------------------------
+
+            if command -v kraft >/dev/null 2>&1; then
+
+              echo "检测到 kraft CLI"
+
+              export UKC_TOKEN="$TOKEN"
+
+              echo "Token 已设置"
+
+            else
+
+              echo "错误：没有可用 CLI"
+              exit 1
+
+            fi
 
           fi
 
           echo ""
-          echo "Cloud 登录步骤完成"
+          echo "登录步骤完成"
 
-      # ============================================================
-      # 9. 准备 Kraftfile
-      #
-      # 我们直接使用 app/Kraftfile。
-      # ============================================================
+      # ==========================================================
+      # 11. 显示 Kraftfile
+      # ==========================================================
 
       - name: 检查 Kraftfile
         shell: bash
@@ -273,21 +368,21 @@ jobs:
           echo "检查 Kraftfile"
           echo "======================================"
 
+          echo ""
+
           cat app/Kraftfile
 
           echo ""
 
           echo "Kraftfile 检查完成"
 
-      # ============================================================
-      # 10. 构建 Firefox Unikraft 镜像
-      # ============================================================
+      # ==========================================================
+      # 12. 构建镜像
+      # ==========================================================
 
       - name: 构建 Firefox Unikraft 镜像
         shell: bash
         env:
-          UKC_TOKEN: ${{ secrets.UKC_TOKEN }}
-          UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
           UNIKRAFT_ORG: ${{ vars.UNIKRAFT_ORG }}
         run: |
           set -e
@@ -297,45 +392,39 @@ jobs:
           echo "======================================"
 
           if [ -z "${UNIKRAFT_ORG:-}" ]; then
-            echo ""
-            echo "错误：没有设置 GitHub Repository Variable："
-            echo "UNIKRAFT_ORG"
-            echo ""
-            echo "例如："
-            echo "ggdbddhg"
-            echo ""
+            echo "错误：UNIKRAFT_ORG 未设置"
             exit 1
           fi
 
           IMAGE="unikraft.io/${UNIKRAFT_ORG}/${PROJECT_NAME}:latest"
 
+          echo ""
           echo "组织：${UNIKRAFT_ORG}"
+          echo "项目：${PROJECT_NAME}"
           echo "镜像：${IMAGE}"
 
           echo ""
 
-          # ========================================================
+          cd app
+
+          # ======================================================
           # 新版 CLI
-          # ========================================================
+          # ======================================================
 
           if command -v unikraft >/dev/null 2>&1; then
 
             echo "使用 unikraft build"
 
-            cd app
-
             unikraft build . \
               --output "${IMAGE}"
 
-          # ========================================================
-          # 如果 Action 没有提供 unikraft，则使用 kraft。
-          # ========================================================
+          # ======================================================
+          # 兼容旧 CLI
+          # ======================================================
 
           elif command -v kraft >/dev/null 2>&1; then
 
             echo "使用 kraft build"
-
-            cd app
 
             kraft build . \
               --output "${IMAGE}"
@@ -354,9 +443,9 @@ jobs:
           echo ""
           echo "镜像：${IMAGE}"
 
-      # ============================================================
-      # 11. 部署 Firefox
-      # ============================================================
+      # ==========================================================
+      # 13. 部署 Firefox
+      # ==========================================================
 
       - name: 部署 Firefox
         shell: bash
@@ -378,6 +467,7 @@ jobs:
 
           IMAGE="unikraft.io/${UNIKRAFT_ORG}/${PROJECT_NAME}:latest"
 
+          echo ""
           echo "组织：${UNIKRAFT_ORG}"
           echo "镜像：${IMAGE}"
           echo "地区：${REGION}"
@@ -386,27 +476,23 @@ jobs:
 
           echo ""
 
-          # ========================================================
+          # ======================================================
           # 新版 CLI
-          #
-          # 官方迁移文档：
-          #
-          # unikraft run
-          #   --metro
-          #   --publish
-          #   --image
-          #
-          # ========================================================
+          # ======================================================
 
           if command -v unikraft >/dev/null 2>&1; then
 
-            echo "使用 unikraft run"
+            echo "使用新版 unikraft CLI"
 
             unikraft run \
               --metro "${REGION}" \
-              --publish "443:${APP_PORT}/http+tls" \
               --memory "${MEMORY}" \
+              --publish "443:${APP_PORT}/http+tls" \
               --image "${IMAGE}"
+
+          # ======================================================
+          # 旧版兼容
+          # ======================================================
 
           elif command -v kraft >/dev/null 2>&1; then
 
@@ -416,8 +502,8 @@ jobs:
 
             kraft cloud deploy \
               --metro "${REGION}" \
-              --publish "443:${APP_PORT}/http+tls" \
               --memory "${MEMORY}" \
+              --publish "443:${APP_PORT}/http+tls" \
               --image "${IMAGE}"
 
           else
@@ -427,9 +513,9 @@ jobs:
 
           fi
 
-      # ============================================================
-      # 12. 部署完成
-      # ============================================================
+      # ==========================================================
+      # 14. 完成
+      # ==========================================================
 
       - name: 部署完成
         shell: bash
@@ -438,11 +524,17 @@ jobs:
           echo "======================================"
           echo "Firefox Unikraft 部署完成"
           echo "======================================"
+
           echo ""
           echo "项目：${PROJECT_NAME}"
           echo "地区：${REGION}"
           echo "内存：${MEMORY}"
           echo "端口：${APP_PORT}"
+
           echo ""
-          echo "请进入 Unikraft Cloud 控制台查看实例状态。"
+
+          echo "如果实例正常启动，"
+          echo "Unikraft Cloud 会显示对应的 *.unikraft.app 地址。"
+
           echo ""
+          echo "======================================"
