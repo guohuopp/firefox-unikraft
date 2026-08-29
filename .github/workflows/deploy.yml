@@ -7,13 +7,13 @@ CLI="unikraft"
 PHASE="${1:-}"
 
 if [ -z "$PHASE" ]; then
-    echo "用法：./deploy.sh prepare|build|deploy"
+    echo "用法：bash scripts/deploy.sh prepare|build|deploy"
     exit 1
 fi
 
 echo ""
 echo "======================================"
-echo "      Firefox + Unikraft Cloud"
+echo "       Firefox + Unikraft Cloud"
 echo "======================================"
 
 # ============================================================
@@ -34,10 +34,6 @@ fi
 
 REGIONS_RAW="${REGIONS:-sfo}"
 
-# 兼容：
-# sfo
-# sfo,sin
-# "sfo - 美国旧金山"
 REGIONS=$(printf '%s' "$REGIONS_RAW" \
     | tr ',' ' ' \
     | sed 's/ -.*//' \
@@ -52,16 +48,17 @@ echo "地区：$REGIONS"
 echo "内存：${MEMORY_MB}MB"
 echo "端口：$APP_PORT"
 
+
 # ============================================================
-# 登录 Unikraft
+# 登录
 # ============================================================
 
 login() {
 
     echo ""
-    echo "--------------------------------------"
-    echo "登录 Unikraft"
-    echo "--------------------------------------"
+    echo "======================================"
+    echo "登录 Unikraft Cloud"
+    echo "======================================"
 
     if [ -z "${UNIKRAFT_API_TOKEN:-}" ]; then
         echo "错误：没有设置 UNIKRAFT_API_TOKEN"
@@ -70,32 +67,40 @@ login() {
 
     TOKEN="$UNIKRAFT_API_TOKEN"
 
+    ORG="${UNIKRAFT_ORG:-}"
+
     # --------------------------------------------------------
-    # 从 token 中解析组织名称
+    # 如果没有手动设置组织名，尝试从 token 解码
     # --------------------------------------------------------
 
-    ORG=""
+    if [ -z "$ORG" ]; then
 
-    if printf '%s' "$TOKEN" | base64 -d >/tmp/unikraft-token-decoded 2>/dev/null; then
+        DECODED=""
 
-        ORG=$(cat /tmp/unikraft-token-decoded \
-            | cut -d ':' -f1 \
-            | sed 's/^robot\$//' \
-            | sed 's/\.users\.kraftcloud$//' \
-            | tr -d '\r\n')
+        if DECODED=$(printf '%s' "$TOKEN" | base64 -d 2>/dev/null); then
+
+            ORG=$(printf '%s' "$DECODED" \
+                | cut -d ':' -f1 \
+                | sed 's/^robot\$//' \
+                | sed 's/\.users\.kraftcloud$//' \
+                | tr -d '\r\n')
+
+        fi
 
     fi
 
-    # 如果无法解析，则允许手动指定
     if [ -z "$ORG" ]; then
 
-        if [ -n "${UNIKRAFT_ORG:-}" ]; then
-            ORG="$UNIKRAFT_ORG"
-        else
-            echo "错误：无法从 UNIKRAFT_API_TOKEN 解析组织名称"
-            echo "可以设置 UNIKRAFT_ORG"
-            exit 1
-        fi
+        echo ""
+        echo "错误：无法从 UNIKRAFT_API_TOKEN 获取组织名称"
+        echo ""
+        echo "请在 GitHub Secrets 增加："
+        echo ""
+        echo "UNIKRAFT_ORG"
+        echo ""
+        echo "值填写你的 Unikraft 组织名称"
+        echo ""
+        exit 1
 
     fi
 
@@ -105,27 +110,45 @@ login() {
     # 登录
     # --------------------------------------------------------
 
-    printf '%s' "$TOKEN" | "$CLI" login \
+    if ! printf '%s' "$TOKEN" | "$CLI" login \
         --token=- \
-        --organization "$ORG"
+        --organization "$ORG"; then
+
+        echo ""
+        echo "Unikraft 登录失败"
+        exit 1
+
+    fi
 
     echo ""
     echo "登录成功"
     echo "组织：$ORG"
 
     # --------------------------------------------------------
-    # 最重要：
-    # 所有阶段统一使用这个镜像地址
+    # 非常重要
+    #
+    # 官方中心仓库：
+    #
+    # index.unikraft.io
+    #
+    # 但是 CLI 的 build/run 可以使用：
+    #
+    # ORG/NAME:latest
+    #
+    # CLI 会自动对应到中心 registry。
     # --------------------------------------------------------
 
-    IMAGE="unikraft.io/${ORG}/${NAME}:latest"
+    IMAGE="${ORG}/${NAME}:latest"
 
     echo ""
-    echo "最终镜像：$IMAGE"
+    echo "组织：$ORG"
+    echo "镜像名称：$IMAGE"
+    echo "中心仓库：index.unikraft.io"
 
     export ORG
     export IMAGE
 }
+
 
 # ============================================================
 # prepare
@@ -135,7 +158,7 @@ prepare() {
 
     echo ""
     echo "======================================"
-    echo "准备 Firefox Unikraft 镜像"
+    echo "准备 Firefox"
     echo "======================================"
 
     # --------------------------------------------------------
@@ -143,32 +166,59 @@ prepare() {
     # --------------------------------------------------------
 
     if [ ! -d "app" ]; then
-        echo "错误：找不到 app/ 目录"
+
         echo ""
-        echo "项目结构应该是："
+        echo "错误：找不到 app/"
+
+        echo ""
+        echo "正确结构："
         echo ""
         echo "app/"
-        echo " ├── index.js"
-        echo " └── package.json"
+        echo "├── index.js"
+        echo "└── package.json"
         echo ""
+
         exit 1
+
     fi
 
-    # --------------------------------------------------------
-    # Firefox Node 项目检查
-    # --------------------------------------------------------
-
     if [ ! -f "app/index.js" ]; then
+
+        echo ""
         echo "错误：找不到 app/index.js"
         exit 1
+
     fi
 
     if [ ! -f "app/package.json" ]; then
+
+        echo ""
         echo "错误：找不到 app/package.json"
         exit 1
+
     fi
 
-    echo "检测到 Node.js Firefox 项目"
+    echo "Firefox Node.js 项目检查通过"
+
+
+    # --------------------------------------------------------
+    # 检查 pull-base.py
+    # --------------------------------------------------------
+
+    if [ ! -f "scripts/pull-base.py" ]; then
+
+        echo ""
+        echo "错误：找不到 scripts/pull-base.py"
+        echo ""
+        echo "请确认文件存在："
+        echo ""
+        echo "scripts/pull-base.py"
+        echo ""
+
+        exit 1
+
+    fi
+
 
     # --------------------------------------------------------
     # 清理旧构建
@@ -176,49 +226,62 @@ prepare() {
 
     rm -rf _build
 
-    mkdir -p _build/rootfs/app
+    mkdir -p _build/rootfs
+
 
     # --------------------------------------------------------
-    # 下载 Node Alpine 基础 rootfs
+    # 拉取 Node.js 20 Alpine
     # --------------------------------------------------------
 
     echo ""
-    echo "下载 Node.js 20 Alpine 基础镜像..."
-
-    if [ ! -f "scripts/pull-base.py" ]; then
-        echo "错误：找不到 scripts/pull-base.py"
-        exit 1
-    fi
+    echo "======================================"
+    echo "下载 Node.js 20 Alpine"
+    echo "======================================"
 
     python3 scripts/pull-base.py \
         library/node \
         20-alpine \
         _build/rootfs
 
+    echo ""
+    echo "Node.js rootfs 准备完成"
+
+
     # --------------------------------------------------------
-    # 安装 Node 依赖
+    # 安装 Node.js 依赖
     # --------------------------------------------------------
 
     echo ""
-    echo "安装 Firefox Node.js 依赖..."
+    echo "======================================"
+    echo "安装 Firefox Node.js 依赖"
+    echo "======================================"
 
-    cd app
+    (
+        cd app
 
-    npm install \
-        --omit=dev \
-        --no-audit \
-        --no-fund
+        npm install \
+            --omit=dev \
+            --no-audit \
+            --no-fund
+    )
 
-    cd ..
 
     # --------------------------------------------------------
-    # 拷贝应用
+    # 创建 /app
+    # --------------------------------------------------------
+
+    mkdir -p _build/rootfs/app
+
+
+    # --------------------------------------------------------
+    # 复制 Firefox 程序
     # --------------------------------------------------------
 
     echo ""
     echo "复制 Firefox 应用..."
 
     cp -a app/. _build/rootfs/app/
+
 
     # --------------------------------------------------------
     # 创建启动脚本
@@ -227,28 +290,45 @@ prepare() {
     cat > _build/rootfs/app/start.sh <<'EOF'
 #!/bin/sh
 
-set -e
+echo "======================================"
+echo "Firefox + Node.js"
+echo "======================================"
 
 cd /app
 
+echo "当前目录：$(pwd)"
+
+echo "Node.js："
+node --version
+
+echo "应用文件："
+ls -la /app
+
+echo "检查 index.js..."
+
+if [ ! -f /app/index.js ]; then
+    echo "错误：/app/index.js 不存在"
+    exit 1
+fi
+
+echo "检查 package.json..."
+
+if [ -f /app/package.json ]; then
+    echo "package.json OK"
+fi
+
 echo "======================================"
-echo "Firefox Node.js Application"
+echo "启动 Firefox Node.js 服务"
 echo "======================================"
-
-echo "Node：$(node --version)"
-
-echo "目录："
-ls -la /app || true
-
-echo "启动 index.js..."
 
 exec node /app/index.js
 EOF
 
     chmod 755 _build/rootfs/app/start.sh
 
+
     # --------------------------------------------------------
-    # 创建 Kraftfile
+    # Kraftfile
     # --------------------------------------------------------
 
     cat > _build/Kraftfile <<'EOF'
@@ -260,32 +340,41 @@ rootfs:
   source: ./rootfs
   format: erofs
 
-cmd:
-  - /bin/sh
-  - /app/start.sh
+cmd: ["/bin/sh", "/app/start.sh"]
 EOF
 
+
+    # --------------------------------------------------------
+    # 检查文件
+    # --------------------------------------------------------
+
     echo ""
     echo "======================================"
-    echo "Kraftfile 创建完成"
+    echo "检查构建文件"
     echo "======================================"
 
     echo ""
-    echo "构建目录：_build"
-    echo "启动命令：/bin/sh /app/start.sh"
+    echo "Kraftfile："
+
+    cat _build/Kraftfile
 
     echo ""
-    echo "Firefox 应用："
-    echo "    /app/index.js"
+    echo "启动脚本："
+
+    cat _build/rootfs/app/start.sh
 
     echo ""
-    echo "HTTP 端口：$APP_PORT"
+    echo "Firefox 文件："
+
+    ls -lah _build/rootfs/app
+
 
     echo ""
     echo "======================================"
     echo "prepare 完成"
     echo "======================================"
 }
+
 
 # ============================================================
 # build
@@ -304,57 +393,95 @@ build() {
 
     login
 
+
     # --------------------------------------------------------
-    # 检查构建目录
+    # 如果没有 rootfs 自动 prepare
     # --------------------------------------------------------
 
     if [ ! -d "_build/rootfs" ]; then
 
-        echo "没有找到 _build/rootfs"
-
         echo ""
+        echo "没有发现 _build/rootfs"
         echo "自动执行 prepare..."
 
         prepare
 
     fi
 
+
+    if [ ! -f "_build/Kraftfile" ]; then
+
+        echo ""
+        echo "没有发现 _build/Kraftfile"
+        echo "自动执行 prepare..."
+
+        prepare
+
+    fi
+
+
     # --------------------------------------------------------
-    # 强制使用组织镜像
+    # 镜像名称
     #
-    # 绝对不能使用：
+    # 注意：
     #
-    # gggds:latest
+    # 这里必须是：
     #
-    # 否则 Unikraft 会默认变成：
+    # $ORG/$NAME:latest
     #
-    # unikraft.io/official/gggds:latest
+    # 不能写：
     #
+    # $NAME:latest
+    #
+    # 否则会进入 official namespace。
     # --------------------------------------------------------
 
-    IMAGE="unikraft.io/${ORG}/${NAME}:latest"
+    IMAGE="${ORG}/${NAME}:latest"
 
     echo ""
+    echo "======================================"
+    echo "镜像信息"
+    echo "======================================"
+
     echo "组织：$ORG"
-    echo "项目：$NAME"
     echo "镜像：$IMAGE"
+    echo "Registry：index.unikraft.io"
+
+
+    # --------------------------------------------------------
+    # 构建并推送
+    # --------------------------------------------------------
 
     echo ""
-    echo "开始构建并推送镜像..."
+    echo "开始构建并推送..."
     echo ""
 
     "$CLI" build \
         _build \
         --output "$IMAGE"
 
+
     echo ""
     echo "======================================"
     echo "镜像构建成功"
     echo "======================================"
+
     echo ""
     echo "镜像：$IMAGE"
     echo ""
+
+    # --------------------------------------------------------
+    # 列出镜像
+    # --------------------------------------------------------
+
+    echo "检查镜像..."
+
+    "$CLI" images list || true
+
+    echo ""
+    echo "build 完成"
 }
+
 
 # ============================================================
 # deploy
@@ -369,19 +496,19 @@ deploy() {
 
     login
 
-    IMAGE="unikraft.io/${ORG}/${NAME}:latest"
+    IMAGE="${ORG}/${NAME}:latest"
 
     echo ""
     echo "组织：$ORG"
-    echo "项目：$NAME"
     echo "镜像：$IMAGE"
     echo "地区：$REGIONS"
     echo "内存：${MEMORY_MB}MB"
     echo "端口：$APP_PORT"
 
-    # --------------------------------------------------------
-    # 每个地区部署
-    # --------------------------------------------------------
+
+    # ========================================================
+    # 一个地区一个地区部署
+    # ========================================================
 
     for R in $REGIONS; do
 
@@ -396,7 +523,15 @@ deploy() {
         echo "地区：$R"
         echo "======================================"
 
-        SERVICE_NAME="${NAME}-${R}"
+
+        # ----------------------------------------------------
+        # 实例名称
+        # ----------------------------------------------------
+
+        INSTANCE_NAME="$NAME"
+
+        echo "实例名称：$INSTANCE_NAME"
+
 
         # ----------------------------------------------------
         # 删除旧实例
@@ -405,21 +540,33 @@ deploy() {
         echo ""
         echo "检查旧实例..."
 
-        OLD_IDS=$(
-            "$CLI" instances list -o json 2>/dev/null \
-            | jq -r \
-                --arg n "$NAME" \
-                --arg r "$R" \
-                '.[]
-                 | select(.name==$n)
-                 | select(.metro==$r)
-                 | .uuid' \
-            || true
+        OLD_JSON=""
+
+        OLD_JSON=$(
+            "$CLI" instances list -o json 2>/dev/null || true
         )
+
+        if [ -n "$OLD_JSON" ]; then
+
+            OLD_IDS=$(printf '%s' "$OLD_JSON" \
+                | jq -r \
+                    --arg n "$INSTANCE_NAME" \
+                    --arg r "$R" \
+                    '.[] |
+                     select(.name==$n) |
+                     select(.metro==$r) |
+                     .uuid' 2>/dev/null || true)
+
+        else
+
+            OLD_IDS=""
+
+        fi
+
 
         if [ -n "$OLD_IDS" ]; then
 
-            while read -r ID; do
+            while IFS= read -r ID; do
 
                 if [ -n "$ID" ]; then
 
@@ -433,7 +580,11 @@ deploy() {
 
                 fi
 
-            done <<< "$OLD_IDS"
+            done <<EOF
+$OLD_IDS
+EOF
+
+            sleep 3
 
         else
 
@@ -441,41 +592,87 @@ deploy() {
 
         fi
 
-        sleep 2
 
         # ----------------------------------------------------
-        # 创建服务
+        # 启动实例
+        #
+        # 官方现在推荐直接：
+        #
+        # unikraft run
+        #
+        # -p 443:3000/http+tls
+        #
+        # -p 80:443/http+redirect
         # ----------------------------------------------------
 
         echo ""
-        echo "检查服务：$SERVICE_NAME"
+        echo "启动 Firefox..."
 
-        SERVICE_OUTPUT=""
+        RUN_OUTPUT=""
 
-        if SERVICE_OUTPUT=$(
-            "$CLI" services create \
-                --name "$SERVICE_NAME" \
+        if RUN_OUTPUT=$(
+            "$CLI" run \
                 --metro "$R" \
-                --services "443:${APP_PORT}/tls+http" \
-                --services "80:443/http+redirect" \
+                --name "$INSTANCE_NAME" \
+                --memory "${MEMORY_MB}M" \
+                --publish "443:${APP_PORT}/http+tls" \
+                --publish "80:443/http+redirect" \
+                --env "PORT=${APP_PORT}" \
+                --restart always \
+                --scale-to-zero "policy=off" \
+                --image "$IMAGE" \
                 2>&1
         ); then
 
-            echo "服务创建成功"
+            echo "$RUN_OUTPUT"
 
         else
 
-            if printf '%s' "$SERVICE_OUTPUT" \
+            echo ""
+            echo "第一次启动失败："
+            echo "$RUN_OUTPUT"
+
+            # ------------------------------------------------
+            # 镜像同步延迟
+            # ------------------------------------------------
+
+            if printf '%s' "$RUN_OUTPUT" \
                 | grep -qi \
-                "already exists\|in use\|conflict"; then
-
-                echo "服务已经存在，继续部署"
-
-            else
+                "No image\|image.*not found\|not found.*image"; then
 
                 echo ""
-                echo "服务创建失败："
-                echo "$SERVICE_OUTPUT"
+                echo "检测到镜像同步延迟"
+                echo "等待 20 秒..."
+
+                sleep 20
+
+                echo ""
+                echo "第二次启动..."
+
+                RUN_OUTPUT=$(
+                    "$CLI" run \
+                        --metro "$R" \
+                        --name "$INSTANCE_NAME" \
+                        --memory "${MEMORY_MB}M" \
+                        --publish "443:${APP_PORT}/http+tls" \
+                        --publish "80:443/http+redirect" \
+                        --env "PORT=${APP_PORT}" \
+                        --restart always \
+                        --scale-to-zero "policy=off" \
+                        --image "$IMAGE" \
+                        2>&1
+                ) || {
+
+                    echo ""
+                    echo "第二次启动仍然失败："
+                    echo "$RUN_OUTPUT"
+
+                    exit 1
+                }
+
+                echo "$RUN_OUTPUT"
+
+            else
 
                 exit 1
 
@@ -483,138 +680,92 @@ deploy() {
 
         fi
 
-        # ----------------------------------------------------
-        # 等待镜像同步
-        # ----------------------------------------------------
 
         echo ""
-        echo "启动 Firefox 实例..."
-
-        SUCCESS=0
-
-        LAST_OUTPUT=""
-
-        for RETRY in 1 2 3 4 5 6 7 8; do
-
-            echo ""
-            echo "启动尝试：${RETRY}/8"
-
-            LAST_OUTPUT=$(
-                "$CLI" run \
-                    --metro "$R" \
-                    --name "$NAME" \
-                    -m "${MEMORY_MB}M" \
-                    --service "$SERVICE_NAME" \
-                    --scale-to-zero policy=off \
-                    -e "PORT=$APP_PORT" \
-                    --image "$IMAGE" \
-                    2>&1
-            ) && {
-
-                echo "$LAST_OUTPUT"
-
-                SUCCESS=1
-
-                break
-            }
-
-            echo "$LAST_OUTPUT"
-
-            if printf '%s' "$LAST_OUTPUT" \
-                | grep -qi \
-                "No image\|image.*not found\|not found.*image"; then
-
-                echo ""
-                echo "镜像还没有同步到地区 $R"
-                echo "等待 20 秒后重试..."
-
-                sleep 20
-
-            else
-
-                echo ""
-                echo "实例启动失败"
-
-                break
-
-            fi
-
-        done
-
-        # ----------------------------------------------------
-        # 判断启动结果
-        # ----------------------------------------------------
-
-        if [ "$SUCCESS" != "1" ]; then
-
-            echo ""
-            echo "======================================"
-            echo "地区 $R 部署失败"
-            echo "======================================"
-
-            echo "$LAST_OUTPUT"
-
-            exit 1
-
-        fi
-
-        echo ""
-        echo "地区 $R 实例创建成功"
+        echo "地区 $R 实例创建完成"
 
     done
 
-    # --------------------------------------------------------
-    # 等待实例启动
-    # --------------------------------------------------------
+
+    # ========================================================
+    # 等待
+    # ========================================================
 
     echo ""
     echo "======================================"
-    echo "等待 Firefox 实例启动"
+    echo "等待 Firefox 启动"
     echo "======================================"
 
     sleep 5
 
-    # --------------------------------------------------------
-    # 输出最终信息
-    # --------------------------------------------------------
+
+    # ========================================================
+    # 查询实例
+    # ========================================================
 
     echo ""
     echo "======================================"
-    echo "部署完成"
+    echo "部署结果"
     echo "======================================"
 
-    "$CLI" instances list -o json 2>/dev/null \
+    INSTANCE_JSON=$(
+        "$CLI" instances list -o json 2>/dev/null || true
+    )
+
+
+    if [ -z "$INSTANCE_JSON" ]; then
+
+        echo "无法读取实例状态"
+        exit 1
+
+    fi
+
+
+    # --------------------------------------------------------
+    # 输出每个实例
+    # --------------------------------------------------------
+
+    printf '%s' "$INSTANCE_JSON" \
         | jq -r \
             --arg n "$NAME" \
-            '.[]
-             | select(.name==$n)
-             | [
-                 .metro,
-                 .state,
-                 (.services.domains[0].fqdn
-                  // .domains[0].fqdn
-                  // "?")
-               ]
-             | @tsv' \
-        | while IFS=$'\t' read -r METRO STATE DOMAIN; do
+            '.[] |
+             select(.name==$n) |
+             [
+               (.metro // "?"),
+               (.state // "?"),
+               (
+                 .services.domains[0].fqdn
+                 // .domains[0].fqdn
+                 // "?"
+               )
+             ] |
+             @tsv' \
+        | while IFS="$(printf '\t')" read -r METRO STATE DOMAIN; do
 
             echo ""
             echo "地区：$METRO"
             echo "状态：$STATE"
 
             if [ "$DOMAIN" != "?" ]; then
-                echo "地址：https://$DOMAIN"
+
+                echo "Firefox 地址："
+                echo "https://$DOMAIN"
+
             else
-                echo "地址：暂未分配"
+
+                echo "Firefox 地址：等待平台分配"
+
             fi
 
         done
 
+
     echo ""
     echo "======================================"
-    echo "Firefox 部署流程结束"
+    echo "Firefox 部署完成"
     echo "======================================"
 }
+
 
 # ============================================================
 # 主程序
@@ -623,28 +774,37 @@ deploy() {
 case "$PHASE" in
 
     prepare)
+
         prepare
+
         ;;
 
     build)
+
         build
+
         ;;
 
     deploy)
+
         deploy
+
         ;;
 
     *)
+
         echo ""
-        echo "错误：未知阶段 $PHASE"
+        echo "错误：未知阶段：$PHASE"
         echo ""
         echo "正确用法："
         echo ""
-        echo "bash deploy.sh prepare"
-        echo "bash deploy.sh build"
-        echo "bash deploy.sh deploy"
+        echo "bash scripts/deploy.sh prepare"
+        echo "bash scripts/deploy.sh build"
+        echo "bash scripts/deploy.sh deploy"
         echo ""
+
         exit 1
+
         ;;
 
 esac
