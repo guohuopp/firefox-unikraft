@@ -1,23 +1,18 @@
-FROM node:20-bookworm-slim AS node
-
-FROM debian:bookworm-slim
-
-ENV NODE_ENV=production
-ENV PORT=3000
-ENV HOME=/app
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-COPY --from=node /usr/local/bin/node /usr/bin/node
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY package.json ./
 
-COPY --from=node /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
-COPY --from=node /lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
-COPY --from=node /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+RUN npm install \
+    --omit=dev \
+    --no-audit \
+    --no-fund
 
-COPY app/package.json /app/package.json
-COPY app/index.js /app/index.js
+COPY index.js ./
 
-RUN mkdir -p /app/firefox-profile
+ENV PORT=3000
 
-CMD ["/usr/bin/node", "/app/index.js"]
+EXPOSE 3000
+
+CMD ["node", "index.js"]
