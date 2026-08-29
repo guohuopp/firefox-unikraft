@@ -1,267 +1,41 @@
-name: Deploy Firefox to Unikraft Cloud
+    - name: 安装 Unikraft CLI
+      shell: bash
+      run: |
+        set -e
 
-on:
-  workflow_dispatch:
-    inputs:
+        echo "======================================"
+        echo "安装 Unikraft CLI"
+        echo "======================================"
 
-      project_name:
-        description: "Unikraft 应用名称"
-        required: true
-        default: "firefox"
+        curl --proto '=https' --tlsv1.2 -fsSL \
+          https://unikraft.com/cli/install.sh | sh
 
-      metro:
-        description: "Unikraft 部署区域"
-        required: true
-        type: choice
-        default: "sfo"
-        options:
-          - sfo
-          - fra
-          - sin
-          - syd
-          - nrt
+        echo "CLI 安装完成"
 
-      memory:
-        description: "内存"
-        required: true
-        type: choice
-        default: "1536M"
-        options:
-          - "1024M"
-          - "1536M"
-          - "2048M"
-          - "3072M"
+        # 安装脚本通常会放到 ~/.local/bin
+        export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 
-env:
-  PROJECT_NAME: ${{ github.event.inputs.project_name }}
-  METRO: ${{ github.event.inputs.metro }}
-  MEMORY: ${{ github.event.inputs.memory }}
-
-jobs:
-
-  deploy:
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show project
-        run: |
-          echo "======================================"
-          echo "Firefox + Unikraft Cloud"
-          echo "======================================"
-          echo "项目：$PROJECT_NAME"
-          echo "地区：$METRO"
-          echo "内存：$MEMORY"
-          echo "======================================"
-
-      - name: Install Unikraft CLI
-        run: |
-          set -e
-
-          echo "安装 Unikraft CLI..."
-
-          curl -fsSL https://cli.unikraft.com/install.sh | sh
-
-          echo "$HOME/.unikraft/bin" >> "$GITHUB_PATH"
-
+        # 如果安装到了其他常见目录，加入 PATH
+        if [ -d "$HOME/.unikraft/bin" ]; then
           export PATH="$HOME/.unikraft/bin:$PATH"
+        fi
 
-          unikraft version || unikraft --version
+        # 持久化 PATH 给后面的 GitHub Actions step
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Login Unikraft
-        env:
-          UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
-        run: |
-          set -e
+        if [ -d "$HOME/.unikraft/bin" ]; then
+          echo "$HOME/.unikraft/bin" >> "$GITHUB_PATH"
+        fi
 
-          if [ -z "$UNIKRAFT_API_TOKEN" ]; then
-            echo "错误：没有设置 UNIKRAFT_API_TOKEN"
-            exit 1
-          fi
+        echo "PATH=$PATH"
 
-          echo "登录 Unikraft Cloud..."
+        echo "检查 unikraft："
+        command -v unikraft
 
-          printf '%s' "$UNIKRAFT_API_TOKEN" |
-            unikraft login \
-              --token=- \
-              --organization "$(printf '%s' "$UNIKRAFT_API_TOKEN" | base64 -d | cut -d: -f1 | sed 's/^robot\$//' | sed 's/\.users\.kraftcloud$//')"
+        echo "检查版本："
+        unikraft version || unikraft --version
 
-          echo "登录成功"
-
-      - name: Check files
-        run: |
-          set -e
-
-          echo "检查项目..."
-
-          test -f app/index.js
-          test -f app/package.json
-          test -f Dockerfile
-          test -f Kraftfile
-
-          echo "✓ app/index.js"
-          echo "✓ app/package.json"
-          echo "✓ Dockerfile"
-          echo "✓ Kraftfile"
-
-      - name: Build image
-        env:
-          UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
-        run: |
-          set -e
-
-          ORG=$(
-            printf '%s' "$UNIKRAFT_API_TOKEN" |
-            base64 -d |
-            cut -d: -f1 |
-            sed 's/^robot\$//' |
-            sed 's/\.users\.kraftcloud$//'
-          )
-
-          IMAGE="$ORG/$PROJECT_NAME:latest"
-
-          echo "======================================"
-          echo "开始构建"
-          echo "======================================"
-
-          echo "组织：$ORG"
-          echo "镜像：$IMAGE"
-
-          unikraft build . \
-            --output "$IMAGE"
-
-          echo ""
-          echo "======================================"
-          echo "镜像构建完成"
-          echo "======================================"
-
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-
-      - name: Delete old instance
-        run: |
-          set +e
-
-          echo "检查旧实例..."
-
-          unikraft instances list -o json > /tmp/instances.json 2>/dev/null
-
-          jq -r \
-            --arg NAME "$PROJECT_NAME" \
-            '.[] | select(.name==$NAME) | .uuid' \
-            /tmp/instances.json |
-          while read -r UUID; do
-
-            if [ -n "$UUID" ]; then
-
-              echo "删除旧实例：$UUID"
-
-              unikraft instances delete \
-                "$UUID" \
-                --force
-
-            fi
-
-          done
-
-          set -e
-
-          sleep 3
-
-      - name: Create service
-        run: |
-          set -e
-
-          SERVICE="${PROJECT_NAME}-${METRO}"
-
-          echo "创建服务：$SERVICE"
-
-          if unikraft services create \
-            --name "$SERVICE" \
-            --metro "$METRO" \
-            --services "443:3000/tls+http" \
-            --services "80:443/http+redirect"
-          then
-
-            echo "服务创建成功"
-
-          else
-
-            echo "服务可能已经存在，继续部署"
-
-          fi
-
-          echo "SERVICE=$SERVICE" >> "$GITHUB_ENV"
-
-      - name: Deploy
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "开始部署"
-          echo "======================================"
-
-          echo "镜像：$IMAGE"
-          echo "区域：$METRO"
-          echo "内存：$MEMORY"
-          echo "服务：$SERVICE"
-
-          unikraft run \
-            --metro "$METRO" \
-            --name "$PROJECT_NAME" \
-            -m "$MEMORY" \
-            --service "$SERVICE" \
-            --scale-to-zero policy=off \
-            --image "$IMAGE"
-
-      - name: Wait for instance
-        run: |
-          echo ""
-          echo "等待 Firefox 启动..."
-
-          for i in $(seq 1 12); do
-
-            echo "检查 $i/12"
-
-            unikraft instances list -o json |
-              jq -r \
-                --arg NAME "$PROJECT_NAME" \
-                '.[] |
-                 select(.name==$NAME) |
-                 "状态=\(.state) URL=https://\(.domains[0].fqdn // .fqdn // "?")"'
-
-            sleep 5
-
-          done
-
-      - name: Deployment result
-        run: |
-          echo ""
-          echo "======================================"
-          echo "Firefox 部署结果"
-          echo "======================================"
-
-          unikraft instances list -o json |
-            jq -r \
-              --arg NAME "$PROJECT_NAME" \
-              '.[] |
-               select(.name==$NAME) |
-               "地区: \(.metro)\n状态: \(.state)\nURL: https://\(.domains[0].fqdn // .fqdn // "?")\nUUID: \(.uuid)\n"'
-
-          echo "======================================"
-
-      - name: Show logs if failed
-        if: failure()
-        run: |
-          echo ""
-          echo "======================================"
-          echo "部署失败，获取实例信息"
-          echo "======================================"
-
-          unikraft instances list -o json || true
-
-          echo ""
-          echo "如果实例已经创建，请到 Unikraft Console 查看 Logs。"
+        echo "======================================"
+        echo "Unikraft CLI 安装成功"
+        echo "======================================"
