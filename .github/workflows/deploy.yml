@@ -13,34 +13,50 @@ permissions:
 
 env:
   KRAFTKIT_VERSION: "v0.12.15"
+
+  # 你的 Unikraft Cloud 组织
+  UNIKRAFT_ORG: "ggdbddhg"
+
+  # Firefox 项目名称
   PROJECT_NAME: "firefox"
+
+  # HTTP 服务端口
   APP_PORT: "3000"
+
+  # 内存
   MEMORY_MB: "1536"
+
+  # 部署地区
   REGIONS: "sin"
+
 
 jobs:
 
   deploy:
-    name: Build and Deploy Firefox
+
+    name: Firefox + Unikraft Cloud
+
     runs-on: ubuntu-latest
+
 
     steps:
 
-      # =====================================================
-      # 1. 检出代码
-      # =====================================================
+      # ==================================================
+      # 1. 获取代码
+      # ==================================================
 
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      # =====================================================
-      # 2. 检查项目结构
-      # =====================================================
+      # ==================================================
+      # 2. 检查项目
+      # ==================================================
 
       - name: 检查 Firefox 项目
         shell: bash
         run: |
+
           set -e
 
           echo "======================================"
@@ -53,6 +69,7 @@ jobs:
 
           echo ""
           echo "项目文件："
+
           find . -maxdepth 3 -type f | sort
 
           echo ""
@@ -67,20 +84,22 @@ jobs:
             exit 1
           fi
 
-          echo "Firefox Node 项目检查通过"
+          echo ""
+          echo "Firefox 项目检查通过"
 
 
-      # =====================================================
+      # ==================================================
       # 3. 创建根目录 Kraftfile
-      # =====================================================
+      # ==================================================
 
       - name: 创建 Kraftfile
         shell: bash
         run: |
+
           set -e
 
           echo "======================================"
-          echo "创建根目录 Kraftfile"
+          echo "创建 Kraftfile"
           echo "======================================"
 
           cat > Kraftfile <<'EOF'
@@ -96,7 +115,8 @@ jobs:
           EOF
 
           echo ""
-          echo "Kraftfile 内容："
+          echo "Kraftfile："
+
           cat Kraftfile
 
           echo ""
@@ -109,13 +129,14 @@ jobs:
           echo "Kraftfile 创建成功"
 
 
-      # =====================================================
-      # 4. 创建 Firefox 启动脚本
-      # =====================================================
+      # ==================================================
+      # 4. 创建启动脚本
+      # ==================================================
 
-      - name: 创建 Firefox 启动脚本
+      - name: 创建启动脚本
         shell: bash
         run: |
+
           set -e
 
           echo "======================================"
@@ -131,12 +152,14 @@ jobs:
           echo "Firefox + Node.js"
           echo "======================================"
 
+          echo ""
           echo "Node:"
           node --version
 
           echo ""
-          echo "应用目录:"
-          ls -la /app
+          echo "应用目录："
+
+          ls -lah /app
 
           echo ""
           echo "启动 Firefox Node 服务..."
@@ -144,20 +167,22 @@ jobs:
           exec node /app/index.js
           EOF
 
-          chmod +x app/start.sh
+          chmod 755 app/start.sh
 
           echo ""
           echo "启动脚本："
+
           cat app/start.sh
 
           echo ""
-          echo "启动脚本权限："
-          ls -l app/start.sh
+          echo "权限："
+
+          ls -lah app/start.sh
 
 
-      # =====================================================
-      # 5. 安装 Node.js
-      # =====================================================
+      # ==================================================
+      # 5. Node.js 24
+      # ==================================================
 
       - name: 设置 Node.js
         uses: actions/setup-node@v4
@@ -165,57 +190,73 @@ jobs:
           node-version: 24
 
 
-      # =====================================================
-      # 6. 安装 Firefox Node 依赖
-      # =====================================================
+      # ==================================================
+      # 6. 安装 Node 依赖
+      # ==================================================
 
       - name: 安装 Node.js 依赖
         shell: bash
         working-directory: app
         run: |
+
           set -e
 
           echo "======================================"
           echo "安装 Node.js 依赖"
           echo "======================================"
 
-          if [ -f package-lock.json ]; then
-            npm ci --omit=dev --no-audit --no-fund
+          if [ -f "package-lock.json" ]; then
+
+            npm ci \
+              --omit=dev \
+              --no-audit \
+              --no-fund
+
           else
-            npm install --omit=dev --no-audit --no-fund
+
+            npm install \
+              --omit=dev \
+              --no-audit \
+              --no-fund
+
           fi
 
           echo ""
-          echo "依赖安装完成"
+          echo "Node.js 依赖安装完成"
 
 
-      # =====================================================
-      # 7. 检查 Kraftfile
-      # =====================================================
+      # ==================================================
+      # 7. 最终检查
+      # ==================================================
 
-      - name: 最终检查构建目录
+      - name: 检查构建文件
         shell: bash
         run: |
+
           set -e
 
           echo "======================================"
-          echo "最终检查"
+          echo "检查构建文件"
           echo "======================================"
 
           echo ""
           echo "当前目录："
+
           pwd
 
           echo ""
           echo "Kraftfile："
+
           ls -lah Kraftfile
 
           echo ""
           echo "app："
+
           ls -lah app
 
           echo ""
           echo "Kraftfile 内容："
+
           cat Kraftfile
 
           echo ""
@@ -226,16 +267,17 @@ jobs:
           test -f app/start.sh
 
           echo ""
-          echo "所有构建文件检查通过"
+          echo "所有文件检查通过"
 
 
-      # =====================================================
+      # ==================================================
       # 8. 安装 KraftKit
-      # =====================================================
+      # ==================================================
 
       - name: 安装 KraftKit
         shell: bash
         run: |
+
           set -e
 
           echo "======================================"
@@ -249,9 +291,12 @@ jobs:
           API="https://api.github.com/repos/unikraft/kraftkit/releases/tags/${VERSION}"
 
           echo ""
-          echo "获取 Release..."
+          echo "获取 KraftKit Release..."
 
-          curl -fsSL \
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
             -H "Accept: application/vnd.github+json" \
             "$API" \
             -o /tmp/kraftkit-release.json
@@ -267,20 +312,25 @@ jobs:
               data = json.load(f)
 
           for asset in data.get("assets", []):
+
               name = asset.get("name", "")
               url = asset.get("browser_download_url", "")
 
-              if (
-                  "linux_amd64.tar.gz" in name
-                  and name.startswith("kraft_")
-              ):
+              if name == "kraftkit_0.12.15_linux_amd64.tar.gz":
+                  print(url)
+                  break
+
+              if name == "kraft_0.12.15_linux_amd64.tar.gz":
                   print(url)
                   break
           PY
           )"
 
           if [ -z "$DOWNLOAD_URL" ]; then
-            echo "错误：没有找到 KraftKit Linux AMD64 TAR"
+
+            echo ""
+            echo "错误：没有找到 Linux AMD64 KraftKit"
+
             echo ""
             echo "Release 文件："
 
@@ -295,6 +345,7 @@ jobs:
           PY
 
             exit 1
+
           fi
 
           echo ""
@@ -303,24 +354,36 @@ jobs:
 
           mkdir -p "$HOME/.local/bin"
 
-          curl -fL \
+          curl \
+            -fL \
             --retry 5 \
             --retry-delay 3 \
             "$DOWNLOAD_URL" \
             -o /tmp/kraftkit.tar.gz
 
           echo ""
+          echo "下载完成："
+
+          ls -lh /tmp/kraftkit.tar.gz
+
+          echo ""
           echo "解压 KraftKit..."
+
+          rm -rf /tmp/kraftkit
 
           mkdir -p /tmp/kraftkit
 
-          tar -xzf \
-            /tmp/kraftkit.tar.gz \
+          tar \
+            -xzf /tmp/kraftkit.tar.gz \
             -C /tmp/kraftkit
 
           echo ""
           echo "解压内容："
-          find /tmp/kraftkit -maxdepth 3 -type f -print
+
+          find /tmp/kraftkit \
+            -maxdepth 3 \
+            -type f \
+            -print
 
           KRAFT_BINARY="$(
             find /tmp/kraftkit \
@@ -330,195 +393,18 @@ jobs:
           )"
 
           if [ -z "$KRAFT_BINARY" ]; then
-            echo "错误：解压后找不到 kraft"
-            exit 1
-          fi
 
-          cp "$KRAFT_BINARY" "$HOME/.local/bin/kraft"
-
-          chmod +x "$HOME/.local/bin/kraft"
-
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          echo ""
-          echo "Kraft 路径："
-          command -v kraft
-
-          echo ""
-          echo "Kraft 版本："
-          kraft version
-
-
-      # =====================================================
-      # 9. 检查 KraftKit
-      # =====================================================
-
-      - name: 检查 KraftKit
-        shell: bash
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "检查 KraftKit"
-          echo "======================================"
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          command -v kraft
-
-          kraft version
-
-          echo ""
-          echo "检查 Kraftfile："
-
-          if [ ! -f "$GITHUB_WORKSPACE/Kraftfile" ]; then
-            echo "错误：没有 Kraftfile"
-            exit 1
-          fi
-
-          ls -lah "$GITHUB_WORKSPACE/Kraftfile"
-
-          echo ""
-          echo "当前工作目录："
-          pwd
-
-          echo ""
-          echo "Kraftfile："
-          cat "$GITHUB_WORKSPACE/Kraftfile"
-
-
-      # =====================================================
-      # 10. 登录 Unikraft Cloud
-      # =====================================================
-
-      - name: 登录 Unikraft Cloud
-        shell: bash
-        env:
-          UNIKRAFT_API_TOKEN: ${{ secrets.UNIKRAFT_API_TOKEN }}
-          UNIKRAFT_ORG: ${{ vars.UNIKRAFT_ORG }}
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "登录 Unikraft Cloud"
-          echo "======================================"
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          if [ -z "${UNIKRAFT_API_TOKEN:-}" ]; then
-            echo "错误：没有设置 UNIKRAFT_API_TOKEN"
-            exit 1
-          fi
-
-          if [ -z "${UNIKRAFT_ORG:-}" ]; then
-            echo "错误：没有设置 GitHub Repository Variable："
-            echo "UNIKRAFT_ORG"
             echo ""
-            echo "例如："
-            echo "ggdbddhg"
+            echo "错误：找不到 kraft 可执行文件"
+
             exit 1
+
           fi
 
-          echo "认证组织：${UNIKRAFT_ORG}"
-
           echo ""
-          echo "使用 Kraft 登录..."
+          echo "找到 Kraft："
+          echo "$KRAFT_BINARY"
 
-          printf '%s' "$UNIKRAFT_API_TOKEN" \
-            | kraft cloud login \
-                --token-stdin \
-                --organization "$UNIKRAFT_ORG"
-
-          echo ""
-          echo "登录完成"
-
-
-      # =====================================================
-      # 11. 构建镜像
-      # =====================================================
-
-      - name: 构建 Firefox Unikraft 镜像
-        shell: bash
-        env:
-          UNIKRAFT_ORG: ${{ vars.UNIKRAFT_ORG }}
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "构建 Firefox Unikraft 镜像"
-          echo "======================================"
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          if [ -z "${UNIKRAFT_ORG:-}" ]; then
-            echo "错误：没有设置 UNIKRAFT_ORG"
-            exit 1
-          fi
-
-          IMAGE="unikraft.io/${UNIKRAFT_ORG}/${PROJECT_NAME}:latest"
-
-          echo ""
-          echo "组织：${UNIKRAFT_ORG}"
-          echo "项目：${PROJECT_NAME}"
-          echo "镜像：${IMAGE}"
-
-          echo ""
-          echo "确认 Kraftfile："
-
-          test -f Kraftfile
-
-          cat Kraftfile
-
-          echo ""
-          echo "开始构建..."
-
-          kraft build \
-            --as "$IMAGE"
-
-          echo ""
-          echo "======================================"
-          echo "镜像构建完成"
-          echo "======================================"
-          echo "镜像：${IMAGE}"
-
-
-      # =====================================================
-      # 12. 部署
-      # =====================================================
-
-      - name: 部署 Firefox
-        shell: bash
-        env:
-          UNIKRAFT_ORG: ${{ vars.UNIKRAFT_ORG }}
-        run: |
-          set -e
-
-          echo "======================================"
-          echo "部署 Firefox"
-          echo "======================================"
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          IMAGE="unikraft.io/${UNIKRAFT_ORG}/${PROJECT_NAME}:latest"
-
-          echo ""
-          echo "镜像：${IMAGE}"
-          echo "地区：${REGIONS}"
-          echo "内存：${MEMORY_MB}MB"
-          echo "端口：${APP_PORT}"
-
-          echo ""
-          echo "开始部署..."
-
-          kraft cloud deploy \
-            "$IMAGE" \
-            --metro "$REGIONS" \
-            --memory "${MEMORY_MB}M" \
-            --port "${APP_PORT}"
-
-          echo ""
-          echo "======================================"
-          echo "Firefox 部署完成"
-          echo "======================================"
+          cp \
+            "$KRAFT_BINARY" \
+            "$HOME
