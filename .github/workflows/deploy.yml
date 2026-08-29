@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       region:
-        description: "部署地区"
+        description: "选择部署地区"
         required: true
         default: "sfo"
         type: choice
@@ -12,6 +12,7 @@ on:
           - sfo
           - sin
           - fra
+
       project_name:
         description: "项目名称"
         required: true
@@ -22,10 +23,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # =====================================================
+      # 1. 拉取项目
+      # =====================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 检查项目
+
+      # =====================================================
+      # 2. 检查项目文件
+      # =====================================================
+
+      - name: 检查 Firefox 项目
         shell: bash
         run: |
           set -e
@@ -40,6 +51,7 @@ jobs:
 
           echo ""
           echo "项目文件："
+
           find . -maxdepth 3 -type f \
             ! -path "./.git/*" \
             | sort
@@ -63,23 +75,26 @@ jobs:
 
           if [ ! -f "scripts/deploy.sh" ]; then
             echo "错误：找不到 scripts/deploy.sh"
-            echo "请确认 scripts/deploy.sh 已经提交到 GitHub"
             exit 1
           fi
 
-          echo "项目文件检查通过"
+          echo "======================================"
+          echo "项目检查通过"
+          echo "======================================"
 
-      - name: 安装依赖
+
+      # =====================================================
+      # 3. 安装 Node.js 依赖
+      # =====================================================
+
+      - name: 安装 Firefox 依赖
         shell: bash
         run: |
           set -e
 
           echo "======================================"
-          echo "安装 Node.js"
+          echo "安装 Firefox Node.js 依赖"
           echo "======================================"
-
-          node --version
-          npm --version
 
           cd app
 
@@ -90,9 +105,14 @@ jobs:
 
           cd ..
 
-          echo "Node.js 依赖安装完成"
+          echo "依赖安装完成"
 
-      - name: 准备 Firefox rootfs
+
+      # =====================================================
+      # 4. 准备 rootfs
+      # =====================================================
+
+      - name: 准备 Firefox
         shell: bash
         env:
           APP_PORT: "3000"
@@ -100,12 +120,21 @@ jobs:
           set -e
 
           echo "======================================"
-          echo "准备 Firefox"
+          echo "准备 Firefox Unikraft rootfs"
           echo "======================================"
 
           chmod +x scripts/deploy.sh
 
           bash scripts/deploy.sh prepare
+
+
+      # =====================================================
+      # 5. 安装 Unikraft CLI
+      #
+      # 不再使用 GitHub Release API
+      # 不再猜 linux-amd64 文件名
+      # 使用官方安装源
+      # =====================================================
 
       - name: 安装 Unikraft CLI
         shell: bash
@@ -116,53 +145,100 @@ jobs:
           echo "安装 Unikraft CLI"
           echo "======================================"
 
-          if command -v unikraft >/dev/null 2>&1; then
-            echo "Unikraft CLI 已存在"
-          else
-            echo "从 GitHub Release 安装 Unikraft CLI"
+          export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.unikraft/bin:$PATH"
 
-            LATEST_URL=$(
-              curl -fsSL \
-                https://api.github.com/repos/unikraft/cli/releases/latest \
-                | grep '"browser_download_url"' \
-                | grep 'linux-amd64' \
-                | head -n 1 \
-                | cut -d '"' -f 4
-            )
+          echo ""
+          echo "下载官方安装脚本..."
 
-            if [ -z "$LATEST_URL" ]; then
-              echo "无法获取 Unikraft CLI 下载地址"
-              exit 1
+          curl \
+            --proto '=https' \
+            --tlsv1.2 \
+            -fsSL \
+            https://unikraft.com/cli/install.sh \
+            -o /tmp/unikraft-install.sh
+
+          chmod +x /tmp/unikraft-install.sh
+
+          echo ""
+          echo "执行安装脚本..."
+
+          sh /tmp/unikraft-install.sh
+
+          echo ""
+          echo "寻找 unikraft..."
+
+          CLI_PATH=""
+
+          for P in \
+            "$HOME/.local/bin/unikraft" \
+            "$HOME/bin/unikraft" \
+            "$HOME/.unikraft/bin/unikraft" \
+            "/usr/local/bin/unikraft" \
+            "/usr/bin/unikraft"
+          do
+
+            if [ -x "$P" ]; then
+              CLI_PATH="$P"
+              break
             fi
 
-            echo "下载：$LATEST_URL"
+          done
 
-            mkdir -p "$HOME/.local/bin"
+          if [ -z "$CLI_PATH" ]; then
 
-            curl -fL \
-              "$LATEST_URL" \
-              -o /tmp/unikraft-cli
+            CLI_PATH="$(command -v unikraft 2>/dev/null || true)"
 
-            chmod +x /tmp/unikraft-cli
-
-            install \
-              /tmp/unikraft-cli \
-              "$HOME/.local/bin/unikraft"
-
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-            export PATH="$HOME/.local/bin:$PATH"
           fi
 
-          export PATH="$HOME/.local/bin:$PATH"
+          if [ -z "$CLI_PATH" ]; then
+
+            echo ""
+            echo "❌ 找不到 unikraft CLI"
+
+            echo ""
+            echo "PATH："
+            echo "$PATH"
+
+            echo ""
+            echo "搜索文件："
+
+            find "$HOME" \
+              -type f \
+              -name "unikraft" \
+              2>/dev/null || true
+
+            exit 1
+
+          fi
+
+          CLI_DIR="$(dirname "$CLI_PATH")"
 
           echo ""
-          echo "Unikraft CLI："
+          echo "CLI：$CLI_PATH"
+          echo "目录：$CLI_DIR"
+
+          echo "$CLI_DIR" >> "$GITHUB_PATH"
+
+          export PATH="$CLI_DIR:$PATH"
+
+          echo ""
+          echo "======================================"
+          echo "检查 CLI"
+          echo "======================================"
+
           command -v unikraft
 
-          echo ""
-          echo "版本："
           unikraft version || unikraft --version
+
+          echo ""
+          echo "======================================"
+          echo "Unikraft CLI 安装成功"
+          echo "======================================"
+
+
+      # =====================================================
+      # 6. 构建并推送 Firefox 镜像
+      # =====================================================
 
       - name: 构建 Firefox 镜像
         shell: bash
@@ -174,7 +250,7 @@ jobs:
         run: |
           set -e
 
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.unikraft/bin:$PATH"
 
           echo "======================================"
           echo "构建 Firefox Unikraft 镜像"
@@ -183,6 +259,11 @@ jobs:
           chmod +x scripts/deploy.sh
 
           bash scripts/deploy.sh build
+
+
+      # =====================================================
+      # 7. 部署实例
+      # =====================================================
 
       - name: 部署 Firefox
         shell: bash
@@ -196,7 +277,7 @@ jobs:
         run: |
           set -e
 
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.unikraft/bin:$PATH"
 
           echo "======================================"
           echo "部署 Firefox"
